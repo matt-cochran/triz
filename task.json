@@ -1,0 +1,30 @@
+{
+  "id": "TRIZ01",
+  "acceptance": [
+    "triz.ts CLI analyze request.json --offline response.json for deterministic fixture and analyze request.json live classifier; inspect result.json; JSON handoff schemaVersion1; save result to explicit --out path atomically with input hash catalogVersion requested/reported provider/model usage and unknown billed cost",
+    "Fixed supported taxonomy technical (improving one outcome worsens another), physical (same element needs opposing properties), none, insufficient. Validate classifier response closed types, confidence0..1 and classify low-confidence or malformed uncertain; never claim Jev inference deterministic",
+    "Input explicit evidence strings with IDs, desired improvement, worsening outcome, element/opposing properties where relevant. Require grounded references to input evidence for confident output. Do not fabricate evidence",
+    "Versioned small curated software-adapted TRIZ catalog: technical suggests segmentation1 preliminary action10 feedback23 intermediary24 only as broad heuristics, physical suggests time/space/condition separation. Cite https://triz.org/contradictions/ and https://triz.org/principles/; clearly no complete classical39x39 matrix, no claim software heuristic is canonical matrix lookup",
+    "Latest Jev model default openrouter ~typesafe/jev-latest, configurable override; installed Pi SDK ModelRuntime/ModelRegistry.classify normal local auth, use fresh alias resolution registry as supported. Reference /home/mc/working/junior-upgrade/worker.ts createPiClassifier/loadPiSdk for interface. No credentials printed",
+    "Build fixed classifier questions semantic contradiction classification with evidence-grounding bool; output provenance reported actual model when returned, unavailable otherwise. 45s request/startup timeout AbortSignal bounded I/O; pure map functions offline",
+    "Atomic declarative behavioral tests one assertion each using public API/CLI: known technical, physical, none, insufficient, malformed response, low confidence, wrong evidence IDs, output restart inspect, timeout simulated. No actual paid model calls tests no source text assertions",
+    "README usage and limits, canonical skill? no skill needed minimal library export for Junior integration. No dependencies, no git commits/pushes, no premium chat calls"
+  ],
+  "workflow": "test_first",
+  "cwd": "/home/mc/working/triz",
+  "checks": [
+    {
+      "args": [
+        "--test",
+        "triz.test.ts"
+      ],
+      "command": "/home/mc/.nvm/versions/node/v26.5.0/bin/node"
+    }
+  ],
+  "deliverable": "Separate minimal TypeScript TRIZ contradiction classification CLI using latest Jev alias and deterministic catalog validation",
+  "constraints": [
+    "Only /home/mc/working/triz and temporary tests; read named worker.ts and installed Pi docs/provider SDK paths only",
+    "No nested workers or model calls except eventual explicit user live CLI; do not implement full contradiction matrix from memory",
+    "Atomic declarative one behavioral assertion per test; capabilities and public contracts not implementation details"
+  ]
+}

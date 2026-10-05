@@ -1,0 +1,12 @@
+{
+  "version": "0.1.0",
+  "name": "triz",
+  "scripts": {
+    "test": "node --test triz.test.ts"
+  },
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=24"
+  }
+}
