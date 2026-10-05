@@ -1,0 +1,84 @@
+name: Release
+
+# Publishing is gated on the offline suite, the compiled build, and a
+# successful pack. The release is created as a draft for parent review; no
+# live model calls are made here.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  platform-smoke:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-22.04-arm, macos-15-intel, macos-15, windows-latest, windows-11-arm]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+  release:
+    needs: platform-smoke
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+      - name: Pack the architecture-independent release tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./package.json').version")"
+          mkdir -p .artifacts
+          npm pack --pack-destination .artifacts
+          mv ".artifacts/triz-${VERSION}.tgz" ".artifacts/triz-v${VERSION}-node.tgz"
+
+      - name: Generate checksums and release manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./package.json').version")"
+          node scripts/release-manifest.mjs \
+            --tarball ".artifacts/triz-v${VERSION}-node.tgz" \
+            --tag "${GITHUB_REF_NAME}" \
+            --sha "${GITHUB_SHA}" \
+            --out-dir .artifacts
+
+      - name: Verify release assets before publishing
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./package.json').version")"
+          test -f ".artifacts/triz-v${VERSION}-node.tgz"
+          test -f .artifacts/checksums.sha256
+          test -f .artifacts/release-manifest.json
+          (cd .artifacts && sha256sum -c checksums.sha256)
+
+      - name: Create draft GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" \
+            --draft \
+            --title "triz ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            .artifacts/triz-v*-node.tgz \
+            .artifacts/checksums.sha256 \
+            .artifacts/release-manifest.json

@@ -1,9 +1,13 @@
-# triz.ts
+# triz
 
-A minimal, dependency-free TypeScript CLI and library for classifying software
-contradictions using a typed classifier (TypeSafe's Jev via the installed Pi
-SDK). It is a separate tool: it does not run nested workers and makes no
-classifier calls unless the live `analyze` path is explicitly used.
+A minimal, architecture-independent TRIZ contradiction classification CLI and
+library. The published package is compiled JavaScript with **no runtime npm
+dependencies**. It classifies software contradictions with a typed classifier
+(TypeSafe's Jev, optionally via the installed Pi SDK) and maps the result onto
+a small curated software-adapted catalog.
+
+It is a separate tool: it does not run nested workers and makes no classifier
+calls unless the live `analyze` path is explicitly used.
 
 ## What it does
 
@@ -29,27 +33,65 @@ answer without an element and two opposing properties, is downgraded to
 The classifier output is probabilistic. Only the catalog mapping is
 deterministic; the result always records `inferenceDeterministic: false`.
 
-## Install and run
+## Requirements
 
-No dependencies and no install step. Node 26 (or any Node with native
-TypeScript type stripping) runs the file directly.
+- **Node.js 24 or newer.** The shipped JavaScript uses modern ESM and Node
+  builtins only.
+- **No Rust and no native addons.** There is nothing to compile for users. The
+  published package is plain `.js` and runs unchanged on x64 and ARM64 across
+  Linux, macOS, and Windows. It works wherever Node's supported architecture
+  runs; there is no separate native binary and no architecture-specific build.
+- **Optional, for live classification only:** an installed Pi SDK
+  (`@earendil-works/pi-coding-agent`) plus normal local auth. Offline runs need
+  neither.
+
+## Install from a GitHub release
+
+Releases publish a single Node tarball named `triz-v<version>-node.tgz`
+together with `checksums.sha256` and `release-manifest.json`.
+
+```sh
+# 1. Download the release asset, checksum file, and manifest.
+curl -LO https://github.com/matt-cochran/triz/releases/download/v0.1.0/triz-v0.1.0-node.tgz
+curl -LO https://github.com/matt-cochran/triz/releases/download/v0.1.0/checksums.sha256
+curl -LO https://github.com/matt-cochran/triz/releases/download/v0.1.0/release-manifest.json
+
+# 2. Verify the download (Linux: sha256sum, macOS: shasum -a 256 -c).
+sha256sum -c checksums.sha256
+
+# 3. Install the tarball without compiling anything.
+npm install -g ./triz-v0.1.0-node.tgz
+
+# 4. Run it.
+triz catalog
+```
+
+`npm install <tarball>` also works in a project or a temporary prefix. The
+manifest records the version, tag, commit SHA, asset digest, the Node engine,
+and the architecture-independent targets.
+
+## Run
 
 ```sh
 # Deterministic offline run from a fixture (no model call):
-node triz.ts analyze request.json --offline response.json --out result.json
+triz analyze request.json --offline response.json --out result.json
 
 # Live classifier run (the only path that calls Jev):
-node triz.ts analyze request.json --out result.json
+triz analyze request.json --out result.json
 
 # Inspect a persisted handoff:
-node triz.ts inspect result.json
+triz inspect result.json
 
 # Print the curated catalog:
-node triz.ts catalog
+triz catalog
 ```
 
 Options: `--offline <response.json>`, `--out <result.json>`,
 `--provider <provider>`, `--model <model>`, `--timeout-ms <n>`.
+
+The same CLI can be run directly from the compiled file with `node
+dist/triz.js <command>`. npm bin shims and symlinks are recognized on all
+platforms, including Windows `.cmd`/`.ps1` shims.
 
 ## Request format
 
@@ -83,7 +125,9 @@ the explicit `--out` path and contains:
   `principles`
 - `usage` (classifier token usage when reported) and `billedCostUsd`, which is
   always `null`: actual billing is never observed. A usage cost, when present,
-  is a catalog estimate, not a bill.
+  is a catalog estimate, not a bill. The offline/fixture path performs no live
+  classification and incurs no bill; only the explicit live `analyze` path can
+  spend money, and even then the tool does not claim to know the charge.
 - `catalog` metadata and `notes`.
 
 ## Classifier model and bounds
@@ -111,21 +155,48 @@ lookup (`canonicalMatrixLookup: false`).
 
 ## Library use (Junior integration)
 
-`triz.ts` exports the pure pieces so another tool can integrate without the
-CLI: `validateRequest`, `interpretVerdict`, `buildQuestions`,
+The compiled package exports the pure pieces so another tool can integrate
+without the CLI: `validateRequest`, `interpretVerdict`, `buildQuestions`,
 `adaptClassifierResponse`, `buildResult`, `hashInput`, `inspectResult`,
 `writeResultAtomic`, `validateCatalog`, `CATALOG`, `CATALOG_VERSION`,
 `SCHEMA_VERSION`, `analyze`, and `createTrizClassifier`. Use `analyze(request,
 { classify })` with an injected classifier for offline or custom transports.
 
+```js
+import { analyze, CATALOG } from 'triz';
+```
+
+## Build from source
+
+Building is only needed to produce the published artifact. TypeScript and
+`@types/node` are project-local devDependencies pinned by `package-lock.json`;
+runtime has none.
+
+```sh
+npm ci          # install the pinned dev toolchain
+npm run build   # compile triz.ts -> dist/triz.js (node shebang)
+npm test        # compile, then run the offline behavior/package suite
+npm run pack    # produce the installable tarball
+```
+
+`dist/`, `node_modules/`, `*.tgz`, and `.artifacts/` are generated and
+gitignored; no compiled JavaScript is authored or committed. CI (GitHub
+Actions) builds and tests the compiled CLI and package on six mainstream
+OS/architecture runners — Ubuntu 22.04 x64/arm64, macOS 15 Intel/Apple
+silicon, and Windows x64/arm64 — on Node 24 and 26.
+
 ## Tests
 
 ```sh
-node --test triz.test.ts
+npm test
 ```
 
-The suite makes no paid model calls. It covers each taxonomy outcome, malformed
-and low-confidence responses, wrong evidence IDs, catalog validation, atomic
-persistence, and a CLI analyze-then-inspect restart check.
+The suite makes no paid model calls and needs no network. It covers each
+taxonomy outcome, malformed and low-confidence responses, wrong evidence IDs,
+catalog validation, atomic persistence, a CLI analyze-then-inspect restart
+check, and atomic packaged-CLI behavior: the compiled entrypoint, tarball
+contents, package metadata, the release manifest/checksums, and installation
+into a temporary prefix.
 
-Run `npm test` for the offline behavior suite. CI runs on Node 24 and 26. The latest-alias live smoke test returned a technical contradiction at confidence 0.97 (752 tokens); the provider reported the alias rather than a resolved underlying version. Live output is kept in ignored local artifacts. Billed cost remains unknown.
+CI runs on Node 24 and 26 across the supported OS/architecture matrix. Live
+output is kept in ignored local artifacts. Billed cost remains unknown.

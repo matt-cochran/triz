@@ -1,12 +1,35 @@
 {
-  "version": "0.1.0",
   "name": "triz",
-  "scripts": {
-    "test": "node --test triz.test.ts"
-  },
+  "version": "0.1.0",
+  "description": "Architecture-independent TRIZ contradiction classification CLI and library, compiled to JavaScript.",
   "type": "module",
-  "private": true,
+  "main": "./dist/triz.js",
+  "types": "./dist/triz.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/triz.d.ts",
+      "default": "./dist/triz.js"
+    }
+  },
+  "bin": {
+    "triz": "./dist/triz.js"
+  },
+  "files": [
+    "dist/triz.js",
+    "dist/triz.d.ts"
+  ],
   "engines": {
     "node": ">=24"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "pretest": "npm run build",
+    "test": "node --test triz.test.ts triz.package.test.ts",
+    "prepack": "npm run build",
+    "pack": "npm pack"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.1",
+    "typescript": "^5.9.3"
   }
 }
