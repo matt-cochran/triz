@@ -82,6 +82,39 @@ test('compiled CLI writes an offline analysis to the requested out path', () => 
   rmSync(dir, { recursive: true, force: true });
 });
 
+test('compiled CLI catalog exposes all forty principles', () => {
+  const res = runNode([distCli, 'catalog']);
+  assert.equal(JSON.parse(res.stdout).technical.length, 40);
+});
+
+test('compiled CLI catalog reports the triz-software-2 version', () => {
+  const res = runNode([distCli, 'catalog']);
+  assert.equal(JSON.parse(res.stdout).version, 'triz-software-2');
+});
+
+test('compiled CLI inspect retains the catalog version after an offline analysis', () => {
+  const dir = tempDir('triz-cli-');
+  const req = join(dir, 'request.json');
+  const fixture = join(dir, 'response.json');
+  const out = join(dir, 'result.json');
+  writeFileSync(
+    req,
+    JSON.stringify({
+      evidence: [{ id: 'E1', text: 'Caching reduced latency.' }],
+      desiredImprovement: 'Reduce latency',
+      worseningOutcome: 'Data freshness',
+    }),
+  );
+  writeFileSync(
+    fixture,
+    JSON.stringify({ classification: 'technical', confidence: 0.9, evidenceIds: ['E1'], grounding: true }),
+  );
+  runNode([distCli, 'analyze', req, '--offline', fixture, '--out', out]);
+  const inspected = runNode([distCli, 'inspect', out]);
+  assert.equal(JSON.parse(inspected.stdout).catalogVersion, 'triz-software-2');
+  rmSync(dir, { recursive: true, force: true });
+});
+
 // --- Packed tarball ---------------------------------------------------------
 
 test('packed tarball contents match the published file whitelist', () => {
@@ -114,7 +147,7 @@ function buildManifest(): Record<string, any> {
   const out = tempDir('triz-manifest-');
   const res = spawnSync(
     process.execPath,
-    [join(root, 'scripts', 'release-manifest.mjs'), '--tarball', packed.tgz, '--out-dir', out, '--tag', 'v0.1.0', '--sha', 'testsha'],
+    [join(root, 'scripts', 'release-manifest.mjs'), '--tarball', packed.tgz, '--out-dir', out, '--tag', `v${pkg.version}`, '--sha', 'testsha'],
     { cwd: root, encoding: 'utf8' },
   );
   if (res.status !== 0) throw new Error(`manifest failed:\n${res.stderr || res.stdout}`);
@@ -127,7 +160,7 @@ test('release manifest records the sha256 digest of the release asset', () => {
 });
 
 test('release manifest records the stable release asset name', () => {
-  assert.equal(buildManifest().asset.name, 'triz-v0.1.0-node.tgz');
+  assert.equal(buildManifest().asset.name, `triz-v${pkg.version}-node.tgz`);
 });
 
 test('release manifest lists the six architecture-independent runner targets', () => {
@@ -142,6 +175,24 @@ test('release manifest lists the six architecture-independent runner targets', (
 });
 
 // --- Installable package ----------------------------------------------------
+
+test('installed CLI catalog exposes all forty principles', () => {
+  const packed = packOnce();
+  const prefix = tempDir('triz-install-');
+  const install = spawnSync(
+    process.execPath,
+    [npmCli(), 'install', '--prefix', prefix, '--no-save', '--no-audit', '--no-fund', '--ignore-scripts', packed.tgz],
+    { cwd: root, encoding: 'utf8' },
+  );
+  if (install.status !== 0) throw new Error(`install failed:\n${install.stderr || install.stdout}`);
+  const bin =
+    process.platform === 'win32'
+      ? join(prefix, 'node_modules', '.bin', 'triz.cmd')
+      : join(prefix, 'node_modules', '.bin', 'triz');
+  const run = spawnSync(bin, ['catalog'], { cwd: prefix, encoding: 'utf8', shell: process.platform === 'win32' });
+  assert.equal(JSON.parse(run.stdout).technical.length, 40);
+  rmSync(prefix, { recursive: true, force: true });
+});
 
 test('packaged CLI runs after installation into a temporary prefix', () => {
   const packed = packOnce();

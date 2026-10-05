@@ -2,10 +2,12 @@
 // Minimal, dependency-free TRIZ contradiction classification CLI and library.
 //
 // The classification is produced by a typed classifier (TypeSafe's Jev via the
-// installed Pi SDK) and is probabilistic. The catalog below is a small,
-// software-adapted heuristic set. It is NOT the complete classical TRIZ 39x39
-// contradiction matrix, and a software heuristic is not a canonical matrix
-// lookup.
+// installed Pi SDK) and is probabilistic. The catalog below is a complete
+// software-adapted contradiction-resolution heuristic set: all 40 main
+// Inventive Principles plus the six modern MATRIZ physical-contradiction
+// resolution routes. It is NOT the complete classical TRIZ 39x39
+// contradiction matrix, nor the whole TRIZ body of knowledge, and a software
+// heuristic is not a canonical matrix lookup.
 
 import { createHash } from 'node:crypto';
 import { mkdirSync, writeFileSync, renameSync, readFileSync, realpathSync } from 'node:fs';
@@ -17,7 +19,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 // ---------------------------------------------------------------------------
 
 export const SCHEMA_VERSION = 1;
-export const CATALOG_VERSION = 'triz-software-1';
+export const CATALOG_VERSION = 'triz-software-2';
 export const CONFIDENCE_THRESHOLD = 0.6;
 export const CLASSIFIER_TIMEOUT_MS = 45000;
 
@@ -57,61 +59,434 @@ export type Catalog = {
 const CONTRADICTIONS_SOURCE = 'https://triz.org/contradictions/';
 const PRINCIPLES_SOURCE = 'https://triz.org/principles/';
 
+const MATRIZ_METHODOLOGY_SOURCE = 'https://matriz.org/methodology/';
+const MATRIZ_CONTRADICTIONS_SOURCE =
+  'https://wiki.matriz.org/docs/triz/problem-solving-tools-5890/contradictions/';
+const MATRIZ_MATRIX_SOURCE =
+  'https://wiki.matriz.org/docs/triz/problem-solving-tools-5890/contradictions/engineering-contradiction-5995/contradiction-matrix-6026/';
+const MATRIZ_PHYSICAL_SOURCE =
+  'https://matriz.org/wp-content/uploads/2020/04/Selected-Topics-for-Level-1-Training.pdf';
+
+const SOFTWARE_TRIZ_SOURCE =
+  'https://doi.org/10.1016/j.proeng.2015.12.413';
+
+/** Canonical main Inventive Principle IDs, in numbering order. */
+export const PRINCIPLE_IDS: readonly string[] = Array.from({ length: 40 }, (_, i) => String(i + 1));
+
+/** The modern MATRIZ physical-contradiction resolution routes in flow order. */
+export const PHYSICAL_ROUTE_IDS = [
+  'space-separation',
+  'time-separation',
+  'condition-separation',
+  'system-level-separation',
+  'satisfy-both-demands',
+  'bypass-contradiction',
+] as const;
+
 export const CATALOG: Catalog = {
   version: CATALOG_VERSION,
-  citations: [CONTRADICTIONS_SOURCE, PRINCIPLES_SOURCE],
+
+  citations: [
+    CONTRADICTIONS_SOURCE,
+    PRINCIPLES_SOURCE,
+    MATRIZ_METHODOLOGY_SOURCE,
+    MATRIZ_CONTRADICTIONS_SOURCE,
+    MATRIZ_MATRIX_SOURCE,
+    MATRIZ_PHYSICAL_SOURCE,
+    SOFTWARE_TRIZ_SOURCE,
+  ],
+
+  // The 40 principles are complete, but this object does not perform
+  // a lookup in the classical 39 x 39 engineering-parameter matrix.
   canonicalMatrixLookup: false,
+
+  // Complete principles != complete contradiction matrix.
+  // This remains false until all 39 parameters and matrix cells are represented.
   completeClassicalMatrix: false,
+
   disclaimer:
-    'Small software-adapted TRIZ heuristic catalog. It is not the complete classical 39x39 ' +
-    'contradiction matrix, and a software heuristic is not a canonical matrix lookup.',
+    'Complete software-adapted TRIZ contradiction-resolution heuristic catalog: ' +
+    'all 40 main Inventive Principles plus the modern MATRIZ physical-contradiction ' +
+    'resolution routes. Heuristic wording is software-adapted rather than canonical TRIZ wording. ' +
+    'This object does not embed the classical 39x39 Altshuller contradiction matrix and is not ' +
+    'a complete representation of the broader TRIZ body of knowledge, which also includes ARIZ, ' +
+    'Substance-Field analysis, Standard Inventive Solutions, trends of engineering-system evolution, ' +
+    'scientific effects, function analysis, and related methods.',
+
   technical: [
     {
       id: '1',
       name: 'segmentation',
-      heuristic: 'Split the conflicting system into independent parts so each part can be optimized separately.',
+      heuristic:
+        'Split the conflicting system, responsibility, data, or workflow into independently changeable parts so each can be optimized without forcing the same trade-off on the whole.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '2',
+      name: 'extraction',
+      heuristic:
+        'Extract or isolate the component, responsibility, data, behavior, or dependency causing the harmful effect, or retain only the part actually required.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '3',
+      name: 'local quality',
+      heuristic:
+        'Replace uniform treatment with locally specialized structure, behavior, configuration, or policy so each part operates under conditions suited to its role.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '4',
+      name: 'asymmetry',
+      heuristic:
+        'Break unnecessary symmetry: allow different components, replicas, paths, users, or states to have different roles or policies when identical treatment creates the conflict.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '5',
+      name: 'consolidation',
+      heuristic:
+        'Combine compatible components, resources, requests, or operations in space or time when duplication, separation, or coordination overhead creates the conflict.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '6',
+      name: 'universality',
+      heuristic:
+        'Let one component or abstraction perform several compatible functions so redundant components, interfaces, dependencies, or transformations can be removed.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '7',
+      name: 'nesting',
+      heuristic:
+        'Compose components, scopes, containers, or abstractions hierarchically so one can contain, encapsulate, or pass through another.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '8',
+      name: 'counterweight',
+      heuristic:
+        'Offset load, latency, cost, risk, or resource pressure with a compensating mechanism rather than strengthening the constrained mechanism directly.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '9',
+      name: 'prior counteraction',
+      heuristic:
+        'Apply a compensating or protective action before an expected harmful effect occurs so the later effect is neutralized when it arrives.',
       source: PRINCIPLES_SOURCE,
     },
     {
       id: '10',
       name: 'preliminary action',
-      heuristic: 'Perform part of the change ahead of time so a later step no longer trades off against an earlier one.',
+      heuristic:
+        'Precompute, preload, prefetch, preconfigure, validate, reserve, or position what will be needed before the latency-sensitive or failure-sensitive path begins.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '11',
+      name: 'cushion in advance',
+      heuristic:
+        'Prepare redundancy, rollback, fallback, reserve capacity, circuit breaking, recovery data, or other emergency protection before a failure occurs.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '12',
+      name: 'equipotentiality',
+      heuristic:
+        'Equalize states, representations, interfaces, privileges, or operating levels so useful work no longer requires repeated expensive transitions between them.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '13',
+      name: 'do it in reverse',
+      heuristic:
+        'Reverse direction, responsibility, dependency, ownership, control flow, or operation; make the active side passive or the fixed side movable when the conventional direction creates the conflict.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '14',
+      name: 'spheroidality',
+      heuristic:
+        'Replace unnecessarily linear structures or flows with cyclic, ring, rotational, curved, or recursive organization when linearity creates the constraint.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '15',
+      name: 'dynamicity',
+      heuristic:
+        'Make components, parameters, policies, capacity, topology, or bindings adjustable and reconfigurable so behavior can change with operating conditions.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '16',
+      name: 'partial or excessive action',
+      heuristic:
+        'When the exact target is expensive or difficult to achieve directly, deliberately under-shoot or over-shoot it and handle the smaller remaining difference separately.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '17',
+      name: 'transition into a new dimension',
+      heuristic:
+        'Add an axis, layer, hierarchy, partition, channel, dimension, or level of indirection to escape a constraint imposed by the current representation.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '18',
+      name: 'mechanical vibration',
+      heuristic:
+        'Replace static behavior with controlled oscillation, pulsing, polling, heartbeats, resonance, or higher-frequency interaction when periodic variation exposes a better operating regime.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '19',
+      name: 'periodic action',
+      heuristic:
+        'Replace continuous work with periodic, event-driven, scheduled, sampled, or batched action; tune the cadence and use the gaps for other useful work.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '20',
+      name: 'continuity of useful action',
+      heuristic:
+        'Keep useful work flowing and minimize idle or intermediate stages through streaming, pipelining, concurrency, background processing, or reuse of otherwise idle capacity.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '21',
+      name: 'rushing through',
+      heuristic:
+        'Perform an unavoidable harmful, inconsistent, blocked, or risky transitional state quickly so the system spends the minimum possible time exposed to it.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '22',
+      name: 'convert harm into benefit',
+      heuristic:
+        'Turn a harmful factor, waste product, failure mode, contention signal, or rejected result into a useful resource or signal; combine harmful effects when doing so can neutralize them.',
       source: PRINCIPLES_SOURCE,
     },
     {
       id: '23',
       name: 'feedback',
-      heuristic: 'Use feedback from the worsening outcome to correct the improvement instead of accepting the trade-off.',
+      heuristic:
+        'Observe the actual outcome and feed it back into control decisions so behavior adapts instead of accepting the trade-off; change the feedback loop when the existing one is ineffective or unstable.',
       source: PRINCIPLES_SOURCE,
     },
     {
       id: '24',
       name: 'intermediary',
-      heuristic: 'Insert an intermediate carrier or abstraction between the two conflicting outcomes.',
+      heuristic:
+        'Insert a mediator, proxy, adapter, broker, queue, cache, buffer, gateway, or temporary abstraction between conflicting parties.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '25',
+      name: 'self-service',
+      heuristic:
+        'Make a component observe, maintain, heal, configure, replenish, or clean up itself, and reuse otherwise wasted outputs or resources where practical.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '26',
+      name: 'copying',
+      heuristic:
+        'Operate on a replica, cache, snapshot, proxy, model, simulation, projection, or transformed representation when operating on the original is expensive, dangerous, unavailable, or disruptive.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '27',
+      name: 'dispose',
+      heuristic:
+        'Replace an expensive long-lived element with inexpensive disposable or ephemeral instances when durability, lifecycle, or cleanup guarantees create unnecessary complexity.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '28',
+      name: 'replacement of mechanical system',
+      heuristic:
+        'Replace direct or tightly coupled interaction with signals, metadata, events, sensing, declarative rules, virtualization, or another more controllable interaction mechanism.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '29',
+      name: 'pneumatic or hydraulic constructions',
+      heuristic:
+        'Replace rigidly provisioned capacity with elastic or flow-based mechanisms such as queues, streams, pools, buffers, backpressure, or dynamically allocated resources.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '30',
+      name: 'flexible membranes or thin films',
+      heuristic:
+        'Use a lightweight flexible boundary such as a wrapper, facade, policy layer, filter, interceptor, or virtual boundary instead of rigid structural separation.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '31',
+      name: 'porous material',
+      heuristic:
+        'Make a boundary selectively permeable using controlled openings, filters, extension points, plugins, admission rules, sampling, or pre-established channels.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '32',
+      name: 'changing the color',
+      heuristic:
+        'Change representation, labeling, visibility, transparency, telemetry, or observability so otherwise hidden state, differences, or behavior become distinguishable.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '33',
+      name: 'homogeneity',
+      heuristic:
+        'Make interacting elements use the same or closely compatible representation, protocol, abstraction, runtime, or substrate to reduce conversion and mismatch costs.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '34',
+      name: 'rejecting and regenerating parts',
+      heuristic:
+        'Expire, discard, release, recycle, or transform elements after their useful function is complete, and regenerate or restore them when they become necessary again.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '35',
+      name: 'transformation of properties',
+      heuristic:
+        'Resolve the conflict by changing state, configuration, granularity, consistency, concentration, flexibility, precision, capacity, or another governing parameter rather than redesigning the whole system.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '36',
+      name: 'phase transition',
+      heuristic:
+        'Move the element into a qualitatively different operating state, mode, representation, or lifecycle phase whose properties remove the original conflict.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '37',
+      name: 'thermal expansion',
+      heuristic:
+        'Use controlled expansion or contraction of capacity, scope, buffering, replication, or resource allocation in response to changing operating conditions.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '38',
+      name: 'accelerated oxidation',
+      heuristic:
+        'Increase the strength or activation level of an enabling mechanism stepwise—such as validation, enforcement, isolation, replication, or signal intensity—when a weaker interaction requires compensating complexity.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '39',
+      name: 'inert environment',
+      heuristic:
+        'Run the interaction in an isolated, neutralized, sandboxed, side-effect-free, simulated, or otherwise controlled environment so harmful interactions cannot propagate.',
+      source: PRINCIPLES_SOURCE,
+    },
+    {
+      id: '40',
+      name: 'composite materials',
+      heuristic:
+        'Combine heterogeneous components, representations, storage models, algorithms, or execution strategies so the composite provides properties that a uniform design cannot.',
       source: PRINCIPLES_SOURCE,
     },
   ],
+
   physical: [
-    {
-      id: 'time-separation',
-      name: 'separation in time',
-      heuristic: 'Let the element satisfy each opposing property at a different time.',
-      source: CONTRADICTIONS_SOURCE,
-    },
     {
       id: 'space-separation',
       name: 'separation in space',
-      heuristic: 'Let the element satisfy each opposing property in a different place or component.',
-      source: CONTRADICTIONS_SOURCE,
+      heuristic:
+        'Let each opposing requirement hold in a different component, node, region, layer, partition, namespace, or architectural location.',
+      source: MATRIZ_PHYSICAL_SOURCE,
     },
     {
+      id: 'time-separation',
+      name: 'separation in time',
+      heuristic:
+        'Let each opposing requirement hold at a different time, phase, transaction stage, deployment window, operating mode, or lifecycle state.',
+      source: MATRIZ_PHYSICAL_SOURCE,
+    },
+    {
+      // Preserve the existing public ID if it is already persisted or consumed.
+      // Current MATRIZ terminology is "Separation in Relation".
       id: 'condition-separation',
-      name: 'separation by condition',
-      heuristic: 'Let the element satisfy each opposing property under a different condition or context.',
-      source: CONTRADICTIONS_SOURCE,
+      name: 'separation in relation (condition/context)',
+      heuristic:
+        'Let the same element satisfy opposite properties for different users, requests, tenants, relationships, contexts, modes, workloads, or other operating conditions.',
+      source: MATRIZ_PHYSICAL_SOURCE,
+    },
+    {
+      id: 'system-level-separation',
+      name: 'separation in system level',
+      heuristic:
+        'Place one required property at the whole-system or supersystem level and the opposing property at a subsystem, component, instance, or lower abstraction level.',
+      source: MATRIZ_PHYSICAL_SOURCE,
+    },
+    {
+      id: 'satisfy-both-demands',
+      name: 'satisfying contradictory demands',
+      heuristic:
+        'Change state, representation, protocol, parameters, or mechanism so both opposing requirements can hold simultaneously rather than being separated.',
+      source: MATRIZ_PHYSICAL_SOURCE,
+    },
+    {
+      id: 'bypass-contradiction',
+      name: 'bypassing contradictory demands',
+      heuristic:
+        'Redesign the workflow, interaction, architecture, or system boundary so the conflicted parameter or requirement becomes irrelevant instead of being optimized.',
+      source: MATRIZ_PHYSICAL_SOURCE,
     },
   ],
 };
+
+function validateHeuristics(
+  catalog: any,
+  key: 'technical' | 'physical',
+  expected: readonly string[],
+  exactOrder: boolean,
+  errors: string[],
+): void {
+  const list = catalog[key];
+  if (!Array.isArray(list) || list.length === 0) {
+    errors.push(`catalog.${key} must be a non-empty array`);
+    return;
+  }
+  const ids: string[] = [];
+  for (const item of list) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      errors.push(`catalog.${key} entries must be objects`);
+      continue;
+    }
+    if (typeof item.id !== 'string' || !item.id.trim()) errors.push(`catalog.${key} entries need a non-empty id`);
+    else ids.push(item.id);
+    if (typeof item.name !== 'string' || !item.name.trim()) errors.push(`catalog.${key} entry ${item.id} needs a non-empty name`);
+    if (typeof item.heuristic !== 'string' || !item.heuristic.trim()) {
+      errors.push(`catalog.${key} entry ${item.id} needs a non-empty heuristic`);
+    }
+    if (typeof item.source !== 'string' || !item.source.trim()) {
+      errors.push(`catalog.${key} entry ${item.id} needs a non-empty source`);
+    } else if (Array.isArray(catalog.citations) && !catalog.citations.includes(item.source)) {
+      errors.push(`catalog.${key} entry ${item.id} source is not cited in catalog.citations`);
+    }
+  }
+  const duplicates = [...new Set(ids.filter((id, i) => ids.indexOf(id) !== i))];
+  if (duplicates.length) errors.push(`catalog.${key} has duplicate ids: ${duplicates.join(', ')}`);
+  if (exactOrder) {
+    if (ids.length !== expected.length || ids.some((id, i) => id !== expected[i])) {
+      errors.push(`catalog.${key} ids must be exactly [${expected.join(', ')}] in order`);
+    }
+    return;
+  }
+  const missing = expected.filter((id) => !ids.includes(id));
+  const outOfRange = [...new Set(ids.filter((id) => !expected.includes(id)))];
+  if (missing.length) errors.push(`catalog.${key} is missing ids: ${missing.join(', ')}`);
+  if (outOfRange.length) errors.push(`catalog.${key} has out-of-range ids: ${outOfRange.join(', ')}`);
+}
 
 export function validateCatalog(catalog: any): { ok: boolean; errors: string[] } {
   const errors: string[] = [];
@@ -119,10 +494,16 @@ export function validateCatalog(catalog: any): { ok: boolean; errors: string[] }
     return { ok: false, errors: ['catalog must be an object'] };
   }
   if (typeof catalog.version !== 'string' || !catalog.version.trim()) errors.push('catalog.version must be a non-empty string');
-  if (!Array.isArray(catalog.citations) || catalog.citations.length === 0) errors.push('catalog.citations must be a non-empty array');
-  if (!Array.isArray(catalog.technical) || catalog.technical.length === 0) errors.push('catalog.technical must be a non-empty array');
-  if (!Array.isArray(catalog.physical) || catalog.physical.length === 0) errors.push('catalog.physical must be a non-empty array');
-  if (typeof catalog.canonicalMatrixLookup !== 'boolean') errors.push('catalog.canonicalMatrixLookup must be a boolean');
+  if (!Array.isArray(catalog.citations) || catalog.citations.length === 0) {
+    errors.push('catalog.citations must be a non-empty array');
+  } else if (catalog.citations.some((c: any) => typeof c !== 'string' || !c.trim())) {
+    errors.push('catalog.citations entries must be non-empty strings');
+  }
+  // Completeness flags must stay false: a principle catalog is not a matrix.
+  if (catalog.canonicalMatrixLookup !== false) errors.push('catalog.canonicalMatrixLookup must be false');
+  if (catalog.completeClassicalMatrix !== false) errors.push('catalog.completeClassicalMatrix must be false');
+  validateHeuristics(catalog, 'technical', PRINCIPLE_IDS, false, errors);
+  validateHeuristics(catalog, 'physical', PHYSICAL_ROUTE_IDS, true, errors);
   return { ok: errors.length === 0, errors };
 }
 

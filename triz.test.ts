@@ -122,18 +122,41 @@ test('analyze classifies a response citing unknown evidence ids as uncertain', a
   assert.equal(result.classification, 'uncertain');
 });
 
-test('technical results recommend only the four curated broad heuristics', async () => {
+test('technical results recommend the complete forty-principle catalog in order', async () => {
   const result = await analyze(technicalRequest, { offline: technicalVerdict });
-  assert.deepEqual(result.principles.map((p) => p.id), ['1', '10', '23', '24']);
+  assert.deepEqual(
+    result.principles.map((p) => p.id),
+    Array.from({ length: 40 }, (_, i) => String(i + 1)),
+  );
 });
 
-test('physical results recommend the three separation heuristics', async () => {
+test('physical results recommend the six resolution routes in order', async () => {
   const result = await analyze(physicalRequest, { offline: physicalVerdict });
-  assert.deepEqual(result.principles.map((p) => p.name), [
-    'separation in time',
-    'separation in space',
-    'separation by condition',
+  assert.deepEqual(result.principles.map((p) => p.id), [
+    'space-separation',
+    'time-separation',
+    'condition-separation',
+    'system-level-separation',
+    'satisfy-both-demands',
+    'bypass-contradiction',
   ]);
+});
+
+test('none results carry no principle recommendations', async () => {
+  const result = await analyze(noneRequest, { offline: noneVerdict });
+  assert.deepEqual(result.principles, []);
+});
+
+test('insufficient results carry no principle recommendations', async () => {
+  const result = await analyze(insufficientRequest, { offline: insufficientVerdict });
+  assert.deepEqual(result.principles, []);
+});
+
+test('uncertain results carry no principle recommendations', async () => {
+  const result = await analyze(technicalRequest, {
+    offline: { classification: 'bogus', confidence: 0.9, evidenceIds: ['E1'], grounding: true },
+  });
+  assert.deepEqual(result.principles, []);
 });
 
 test('result records the schema version', async () => {
@@ -229,12 +252,71 @@ test('validateRequest rejects evidence entries without an id', () => {
   assert.throws(() => validateRequest({ evidence: [{ text: 'no id' }], desiredImprovement: 'x' }));
 });
 
-test('catalog cites both TRIZ contradiction and principle references', () => {
-  assert.deepEqual(CATALOG.citations, ['https://triz.org/contradictions/', 'https://triz.org/principles/']);
+test('catalog cites the seven specified sources', () => {
+  assert.deepEqual(CATALOG.citations, [
+    'https://triz.org/contradictions/',
+    'https://triz.org/principles/',
+    'https://matriz.org/methodology/',
+    'https://wiki.matriz.org/docs/triz/problem-solving-tools-5890/contradictions/',
+    'https://wiki.matriz.org/docs/triz/problem-solving-tools-5890/contradictions/engineering-contradiction-5995/contradiction-matrix-6026/',
+    'https://matriz.org/wp-content/uploads/2020/04/Selected-Topics-for-Level-1-Training.pdf',
+    'https://doi.org/10.1016/j.proeng.2015.12.413',
+  ]);
+});
+
+test('catalog version is triz-software-2', () => {
+  assert.equal(CATALOG.version, 'triz-software-2');
+});
+
+test('catalog lists all forty principles numbered 1 through 40', () => {
+  assert.deepEqual(
+    CATALOG.technical.map((p) => p.id),
+    Array.from({ length: 40 }, (_, i) => String(i + 1)),
+  );
+});
+
+test('catalog technical principles are sourced from the TRIZ principles reference', () => {
+  assert.equal(CATALOG.technical.every((p) => p.source === 'https://triz.org/principles/'), true);
+});
+
+test('catalog lists the six physical routes in the specified order', () => {
+  assert.deepEqual(CATALOG.physical.map((p) => p.id), [
+    'space-separation',
+    'time-separation',
+    'condition-separation',
+    'system-level-separation',
+    'satisfy-both-demands',
+    'bypass-contradiction',
+  ]);
+});
+
+test('catalog physical routes are sourced from the MATRIZ physical reference', () => {
+  assert.equal(
+    CATALOG.physical.every(
+      (p) => p.source === 'https://matriz.org/wp-content/uploads/2020/04/Selected-Topics-for-Level-1-Training.pdf',
+    ),
+    true,
+  );
+});
+
+test('catalog preserves the condition-separation id while using modern relation wording', () => {
+  const route = CATALOG.physical.find((p) => p.id === 'condition-separation');
+  assert.equal(route?.name, 'separation in relation (condition/context)');
 });
 
 test('catalog is not a canonical classical matrix lookup', () => {
   assert.equal(CATALOG.canonicalMatrixLookup, false);
+});
+
+test('catalog does not claim a complete classical matrix', () => {
+  assert.equal(CATALOG.completeClassicalMatrix, false);
+});
+
+test('catalog disclaimer scopes itself to a contradiction-resolution catalog', () => {
+  assert.equal(
+    CATALOG.disclaimer.includes('Complete software-adapted TRIZ contradiction-resolution heuristic catalog'),
+    true,
+  );
 });
 
 test('validateCatalog accepts the curated catalog', () => {
@@ -243,6 +325,70 @@ test('validateCatalog accepts the curated catalog', () => {
 
 test('validateCatalog rejects a catalog with an empty version', () => {
   assert.equal(validateCatalog({ ...CATALOG, version: '' }).ok, false);
+});
+
+test('validateCatalog rejects a catalog missing a principle id', () => {
+  assert.equal(validateCatalog({ ...CATALOG, technical: CATALOG.technical.slice(0, 39) }).ok, false);
+});
+
+test('validateCatalog rejects a catalog with a duplicate principle id', () => {
+  const technical = [...CATALOG.technical.slice(0, 39), { ...CATALOG.technical[0] }];
+  assert.equal(validateCatalog({ ...CATALOG, technical }).ok, false);
+});
+
+test('validateCatalog rejects a catalog with an out-of-range principle id', () => {
+  const technical = [...CATALOG.technical.slice(0, 39), { ...CATALOG.technical[0], id: '41' }];
+  assert.equal(validateCatalog({ ...CATALOG, technical }).ok, false);
+});
+
+test('validateCatalog rejects a catalog with a wrong route id', () => {
+  const physical = CATALOG.physical.map((p) => (p.id === 'system-level-separation' ? { ...p, id: 'bogus' } : p));
+  assert.equal(validateCatalog({ ...CATALOG, physical }).ok, false);
+});
+
+test('validateCatalog rejects a catalog with routes in the wrong order', () => {
+  const physical = [...CATALOG.physical];
+  [physical[0], physical[1]] = [physical[1], physical[0]];
+  assert.equal(validateCatalog({ ...CATALOG, physical }).ok, false);
+});
+
+test('validateCatalog rejects a catalog with a duplicate route id', () => {
+  const physical = [CATALOG.physical[0], ...CATALOG.physical.slice(0, 5)];
+  assert.equal(validateCatalog({ ...CATALOG, physical }).ok, false);
+});
+
+test('validateCatalog rejects a catalog with a blank principle name', () => {
+  const technical = CATALOG.technical.map((p) => (p.id === '1' ? { ...p, name: '' } : p));
+  assert.equal(validateCatalog({ ...CATALOG, technical }).ok, false);
+});
+
+test('validateCatalog rejects a catalog with a blank heuristic', () => {
+  const technical = CATALOG.technical.map((p) => (p.id === '1' ? { ...p, heuristic: '   ' } : p));
+  assert.equal(validateCatalog({ ...CATALOG, technical }).ok, false);
+});
+
+test('validateCatalog rejects a catalog with a source missing from the citations', () => {
+  const technical = CATALOG.technical.map((p) => (p.id === '1' ? { ...p, source: 'https://example.com/uncited' } : p));
+  assert.equal(validateCatalog({ ...CATALOG, technical }).ok, false);
+});
+
+test('validateCatalog rejects a catalog that claims a canonical matrix lookup', () => {
+  assert.equal(validateCatalog({ ...CATALOG, canonicalMatrixLookup: true }).ok, false);
+});
+
+test('validateCatalog rejects a catalog that claims a complete classical matrix', () => {
+  assert.equal(validateCatalog({ ...CATALOG, completeClassicalMatrix: true }).ok, false);
+});
+
+test('inspectResult retains the historical catalog version of a saved schema 1 result', () => {
+  const dir = tempDir();
+  const out = join(dir, 'result.json');
+  writeFileSync(
+    out,
+    JSON.stringify({ schemaVersion: 1, classification: 'technical', catalogVersion: 'triz-software-1' }),
+  );
+  assert.equal(inspectResult(out).catalogVersion, 'triz-software-1');
+  rmSync(dir, { recursive: true, force: true });
 });
 
 test('writeResultAtomic leaves no temporary files behind', async () => {
