@@ -4,7 +4,7 @@ A minimal, architecture-independent TRIZ contradiction classification CLI and
 library. The published package is compiled JavaScript with **no runtime npm
 dependencies**. It classifies software contradictions with a typed classifier
 (TypeSafe's Jev, optionally via the installed Pi SDK) and maps the result onto
-a small curated software-adapted catalog.
+a complete software-adapted contradiction-resolution catalog.
 
 It is a separate tool: it does not run nested workers and makes no classifier
 calls unless the live `analyze` path is explicitly used.
@@ -52,15 +52,15 @@ together with `checksums.sha256` and `release-manifest.json`.
 
 ```sh
 # 1. Download the release asset, checksum file, and manifest.
-curl -LO https://github.com/matt-cochran/triz/releases/download/v0.1.0/triz-v0.1.0-node.tgz
-curl -LO https://github.com/matt-cochran/triz/releases/download/v0.1.0/checksums.sha256
-curl -LO https://github.com/matt-cochran/triz/releases/download/v0.1.0/release-manifest.json
+curl -LO https://github.com/matt-cochran/triz/releases/download/v0.2.0/triz-v0.2.0-node.tgz
+curl -LO https://github.com/matt-cochran/triz/releases/download/v0.2.0/checksums.sha256
+curl -LO https://github.com/matt-cochran/triz/releases/download/v0.2.0/release-manifest.json
 
 # 2. Verify the download (Linux: sha256sum, macOS: shasum -a 256 -c).
 sha256sum -c checksums.sha256
 
 # 3. Install the tarball without compiling anything.
-npm install -g ./triz-v0.1.0-node.tgz
+npm install -g ./triz-v0.2.0-node.tgz
 
 # 4. Run it.
 triz catalog
@@ -140,18 +140,40 @@ fresh registry per call so the latest alias resolves against the current
 catalog. Requests and SDK startup are bounded by a 45s timeout and an
 `AbortSignal`. Credentials are never printed.
 
-## Catalog limits
+## Catalog scope
 
-The catalog (`triz-software-1`) is a small, software-adapted heuristic set:
+The catalog (`triz-software-2`) is a **complete software-adapted TRIZ
+contradiction-resolution heuristic catalog**:
 
-- `technical` suggests `segmentation` (1), `preliminary action` (10),
-  `feedback` (23), and `intermediary` (24) only as broad heuristics.
-- `physical` suggests separation in time, space, and condition.
+- `technical` lists all **40 main Inventive Principles**, numbered 1–40, with
+  normalized English names and software-adapted heuristic wording.
+- `physical` lists the **six modern MATRIZ physical-contradiction resolution
+  routes** in flow order: separation in space, separation in time, separation
+  in relation (condition/context, retaining the existing `condition-separation`
+  id), separation in system level, satisfying contradictory demands, and
+  bypassing contradictory demands.
 
-It cites <https://triz.org/contradictions/> and
-<https://triz.org/principles/>. It is **not** the complete classical TRIZ
-39x39 contradiction matrix, and a software heuristic is not a canonical matrix
-lookup (`canonicalMatrixLookup: false`).
+The wording is an interpretation layer for software, not modified canonical
+TRIZ taxonomy. The catalog deliberately excludes the historical supplemental
+principles 41–50, the classical 39x39 matrix cells, and the wider TRIZ body of
+knowledge (ARIZ, Substance-Field analysis, Standard Inventive Solutions,
+trends of engineering-system evolution, scientific effects, function analysis).
+
+It cites seven sources:
+
+- <https://triz.org/contradictions/> and <https://triz.org/principles/> for the
+  principles and contradiction concepts.
+- <https://matriz.org/methodology/>, the MATRIZ contradictions wiki, the MATRIZ
+  contradiction-matrix wiki page, and the MATRIZ Level 1 physical-contradiction
+  training material for the current methodology and route flow.
+- <https://doi.org/10.1016/j.proeng.2015.12.413> for adapting TRIZ to
+  information technology.
+
+Having every principle is **not** a complete contradiction matrix: the object
+stores no 39x39 matrix cells. A software heuristic is not a canonical matrix
+lookup, so `canonicalMatrixLookup` and `completeClassicalMatrix` both remain
+`false`. Recommendations are unranked candidate heuristics, not a deterministic
+selection or a canonical matrix ranking.
 
 ## Library use (Junior integration)
 
@@ -159,7 +181,8 @@ The compiled package exports the pure pieces so another tool can integrate
 without the CLI: `validateRequest`, `interpretVerdict`, `buildQuestions`,
 `adaptClassifierResponse`, `buildResult`, `hashInput`, `inspectResult`,
 `writeResultAtomic`, `validateCatalog`, `CATALOG`, `CATALOG_VERSION`,
-`SCHEMA_VERSION`, `analyze`, and `createTrizClassifier`. Use `analyze(request,
+`PRINCIPLE_IDS`, `PHYSICAL_ROUTE_IDS`, `SCHEMA_VERSION`, `analyze`, and
+`createTrizClassifier`. Use `analyze(request,
 { classify })` with an injected classifier for offline or custom transports.
 
 ```js

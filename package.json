@@ -1,6 +1,6 @@
 {
   "name": "triz",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Architecture-independent TRIZ contradiction classification CLI and library, compiled to JavaScript.",
   "type": "module",
   "main": "./dist/triz.js",
