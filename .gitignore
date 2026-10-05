@@ -1,4 +1,8 @@
 .delivery/
 .artifacts/
 node_modules/
+dist/
+*.tgz
+checksums.sha256
+release-manifest.json
 *:Zone.Identifier

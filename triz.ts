@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // Minimal, dependency-free TRIZ contradiction classification CLI and library.
 //
 // The classification is produced by a typed classifier (TypeSafe's Jev via the
@@ -7,9 +8,9 @@
 // lookup.
 
 import { createHash } from 'node:crypto';
-import { mkdirSync, writeFileSync, renameSync, readFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, renameSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, resolve, join, basename } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 
 // ---------------------------------------------------------------------------
 // Fixed taxonomy and bounds
@@ -749,8 +750,21 @@ export async function runCli(argv: string[]): Promise<number> {
   return 1;
 }
 
-const invokedDirectly = process.argv[1] ? /(?:^|[\\/])triz\.ts$/.test(process.argv[1]) : false;
-if (invokedDirectly) {
+/** True when this module is the process entry point. Resolving real paths
+ * makes the check work for `node triz.ts`, the compiled `node dist/triz.js`,
+ * Unix npm bin symlinks (`.bin/triz`), and Windows npm `.cmd`/`.ps1` shims
+ * that invoke the real compiled file. Comparison by real path also keeps the
+ * check independent of the script name, so compiled output is recognized. */
+function isDirectInvocation(argv1: string | undefined = process.argv[1]): boolean {
+  if (!argv1) return false;
+  try {
+    return realpathSync(argv1) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isDirectInvocation()) {
   runCli(process.argv.slice(2)).then(
     (code) => {
       process.exitCode = code;
