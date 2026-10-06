@@ -136,6 +136,13 @@ platforms, including Windows `.cmd`/`.ps1` shims.
 for a confident `technical` result; `element` and `opposingProperties` are
 needed for a confident `physical` result.
 
+The request contract is strict: unknown top-level keys and unknown evidence-item
+keys are rejected with an error naming the offending key, so a misspelled
+optional field (for example `desiredImprovment`) fails validation before any
+classifier or output action instead of being silently ignored. Persisted results
+remain tolerant: `inspect` and `inspectResult` accept historical metadata from
+saved `schemaVersion` 1 results.
+
 ## Result handoff (schemaVersion 1)
 
 `result.json` is written atomically (same-directory temp file, then rename) to

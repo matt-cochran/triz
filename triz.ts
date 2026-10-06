@@ -521,11 +521,27 @@ export type TrizRequest = {
   opposingProperties?: string[];
 };
 
+/** Keys accepted on a new request and on each evidence item. Unknown keys are
+ * rejected so misspelled optional fields cannot be silently ignored. */
+const REQUEST_KEYS = ['evidence', 'desiredImprovement', 'worseningOutcome', 'element', 'opposingProperties'] as const;
+const EVIDENCE_KEYS = ['id', 'text'] as const;
+
+function firstUnknownKey(value: object, allowed: readonly string[]): string | undefined {
+  for (const key of Object.keys(value)) {
+    if (!allowed.includes(key)) return key;
+  }
+  return undefined;
+}
+
 export function validateRequest(input: any): TrizRequest {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw Error('request must be an object');
+  const unknownTopLevel = firstUnknownKey(input, REQUEST_KEYS);
+  if (unknownTopLevel) throw Error(`request has unknown key: ${unknownTopLevel}`);
   if (!Array.isArray(input.evidence) || input.evidence.length === 0) throw Error('request.evidence must be a non-empty array');
   for (const e of input.evidence) {
     if (!e || typeof e !== 'object' || Array.isArray(e)) throw Error('each evidence entry must be an object');
+    const unknownEvidence = firstUnknownKey(e, EVIDENCE_KEYS);
+    if (unknownEvidence) throw Error(`evidence entry ${e.id ?? '(missing id)'} has unknown key: ${unknownEvidence}`);
     if (typeof e.id !== 'string' || !e.id.trim()) throw Error('each evidence entry needs a non-empty id');
     if (typeof e.text !== 'string' || !e.text.trim()) throw Error(`evidence ${e.id} needs non-empty text`);
   }

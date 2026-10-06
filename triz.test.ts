@@ -390,6 +390,69 @@ test('validateRequest rejects evidence entries without an id', () => {
   assert.throws(() => validateRequest({ evidence: [{ text: 'no id' }], desiredImprovement: 'x' }));
 });
 
+test('validateRequest rejects an unknown top-level request key by name', () => {
+  assert.throws(
+    () => validateRequest({ ...technicalRequest, desiredImprovment: 'typo' }),
+    /desiredImprovment/,
+  );
+});
+
+test('validateRequest rejects an unknown evidence-item key by name', () => {
+  assert.throws(
+    () => validateRequest({ ...technicalRequest, evidence: [{ id: 'E1', text: 'x', txt: 'typo' }] }),
+    /txt/,
+  );
+});
+
+test('validateRequest keeps supporting worseningOutcome', () => {
+  assert.equal(validateRequest(technicalRequest).worseningOutcome, 'Data freshness');
+});
+
+test('validateRequest keeps supporting element', () => {
+  assert.equal(validateRequest(physicalRequest).element, 'response cache');
+});
+
+test('validateRequest keeps supporting opposingProperties', () => {
+  assert.deepEqual(validateRequest(physicalRequest).opposingProperties, ['large for hit rate', 'small for memory']);
+});
+
+test('validateRequest accepts a request with only the required fields', () => {
+  assert.doesNotThrow(() => validateRequest(noneRequest));
+});
+
+test('analyze skips the classifier for a request with an unknown key', async () => {
+  let called = false;
+  await analyze(
+    { ...technicalRequest, ignoredTypo: true },
+    {
+      classify: async () => {
+        called = true;
+        return {};
+      },
+    },
+  ).catch(() => {});
+  assert.equal(called, false);
+});
+
+test('analyze with an unknown request key writes no output file', async () => {
+  const dir = tempDir();
+  const out = join(dir, 'result.json');
+  await analyze({ ...technicalRequest, ignoredTypo: true }, { offline: technicalVerdict, out }).catch(() => {});
+  assert.equal(existsSync(out), false);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('inspectResult tolerates unknown historical metadata on a saved schema 1 result', () => {
+  const dir = tempDir();
+  const out = join(dir, 'result.json');
+  writeFileSync(
+    out,
+    JSON.stringify({ schemaVersion: 1, classification: 'technical', historicalNote: 'kept', legacyMeta: { v: 0 } }),
+  );
+  assert.equal(inspectResult(out).classification, 'technical');
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test('catalog cites the seven specified sources', () => {
   assert.deepEqual(CATALOG.citations, [
     'https://triz.org/contradictions/',
