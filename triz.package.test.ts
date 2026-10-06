@@ -119,6 +119,7 @@ test('compiled CLI inspect retains the catalog version after an offline analysis
 
 test('packed tarball contents match the published file whitelist', () => {
   assert.deepEqual([...packOnce().files].sort(), [
+    'LICENSE',
     'README.md',
     'dist/triz.d.ts',
     'dist/triz.js',

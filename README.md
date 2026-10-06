@@ -1,7 +1,7 @@
 # triz
 
 A minimal, architecture-independent TRIZ contradiction classification CLI and
-library. The published package is compiled JavaScript with **no runtime npm
+library. The release package is compiled JavaScript with **no runtime npm
 dependencies**. It classifies software contradictions with a typed classifier
 (TypeSafe's Jev, optionally via the installed Pi SDK) and maps the result onto
 a complete software-adapted contradiction-resolution catalog.
@@ -223,3 +223,7 @@ into a temporary prefix.
 
 CI runs on Node 24 and 26 across the supported OS/architecture matrix. Live
 output is kept in ignored local artifacts. Billed cost remains unknown.
+
+## Open-source project
+
+MIT licensed. See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [SUPPORT.md](SUPPORT.md). Live analysis sends supplied evidence to the configured provider; offline classification fixtures require no provider access. Results are reviewable candidate strategies, not automatic implementation decisions. GitHub release tarballs do not imply npm registry availability.

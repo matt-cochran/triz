@@ -16,7 +16,9 @@
   },
   "files": [
     "dist/triz.js",
-    "dist/triz.d.ts"
+    "dist/triz.d.ts",
+    "LICENSE",
+    "README.md"
   ],
   "engines": {
     "node": ">=24"
@@ -31,5 +33,18 @@
   "devDependencies": {
     "@types/node": "^24.19.1",
     "typescript": "^5.9.3"
+  },
+  "license": "MIT",
+  "author": {
+    "email": "matthew@cochranweb.com",
+    "name": "Matthew Cochran"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/matt-cochran/triz.git"
+  },
+  "homepage": "https://github.com/matt-cochran/triz#readme",
+  "bugs": {
+    "url": "https://github.com/matt-cochran/triz/issues"
   }
 }
