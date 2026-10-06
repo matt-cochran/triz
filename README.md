@@ -147,11 +147,20 @@ the explicit `--out` path and contains:
   classifier actually returned, or `unavailable` when it did not return one.
 - `classification`, `confidence`, `groundedEvidenceIds`, `rationale`,
   `principles`
-- `usage` (classifier token usage when reported) and `billedCostUsd`, which is
-  always `null`: actual billing is never observed. A usage cost, when present,
-  is a catalog estimate, not a bill. The offline/fixture path performs no live
-  classification and incurs no bill; only the explicit live `analyze` path can
-  spend money, and even then the tool does not claim to know the charge.
+- `usage`, or `null` when the classifier reported none. A reported usage
+  carries `input`, `output`, `cacheRead`, `cacheWrite`, `totalTokens`, and an
+  `available` flag. Token counts are not presented as authoritative zeros when
+  data is missing: `available` is the signal that the Pi SDK reported usage,
+  while a reported count of `0` is a real zero.
+- `usage.costUsd` is the legacy flat Pi-reported total in USD; `usage.piReported`
+  is the labelled form (`{ amountUsd, available, source: "pi_reported" }`). A
+  missing cost is `null` with `available: false`; a reported zero is `0` with
+  `available: true`, so unknown and free are never conflated.
+- `billedCostUsd`, which is always `null`: actual billing is never observed. A
+  Pi-reported cost is an estimate, not a bill, and an absent cost is unknown
+  rather than free. The offline/fixture path performs no live classification and
+  incurs no bill; only the explicit live `analyze` path can spend money, and
+  even then the tool does not claim to know the charge.
 - `catalog` metadata and `notes`.
 
 ## Classifier model and bounds
@@ -240,8 +249,9 @@ npm test
 
 The suite makes no paid model calls and needs no network. It covers each
 taxonomy outcome, malformed and low-confidence responses, wrong evidence IDs,
-catalog validation, atomic persistence, a CLI analyze-then-inspect restart
-check, and atomic packaged-CLI behavior: the compiled entrypoint, tarball
+catalog validation, usage availability with missing, zero, cached, and finite
+Pi costs, atomic persistence, a CLI analyze-then-inspect restart check, and
+atomic packaged-CLI behavior: the compiled entrypoint, tarball
 contents, package metadata, the release manifest/checksums, and installation
 into a temporary prefix.
 

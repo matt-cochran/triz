@@ -249,6 +249,123 @@ test('result includes classifier usage when reported', async () => {
   assert.equal(result.usage?.input, 42);
 });
 
+function classifierWithUsage(usage: unknown) {
+  return async () => ({
+    answers: {
+      classification: { type: 'choice', choice: 'technical', confidence: 0.9 },
+      evidence_grounding: { type: 'bool', probability: 0.9 },
+      evidence_E1: { type: 'bool', probability: 0.9 },
+    },
+    usage,
+  });
+}
+
+test('analyze reports cache-read tokens when the classifier provides them', async () => {
+  const result = await analyze(technicalRequest, {
+    classify: classifierWithUsage({ input: 10, output: 5, cacheRead: 100, cacheWrite: 20, totalTokens: 135 }),
+  });
+  assert.equal(result.usage?.cacheRead, 100);
+});
+
+test('analyze reports cache-write tokens when the classifier provides them', async () => {
+  const result = await analyze(technicalRequest, {
+    classify: classifierWithUsage({ input: 10, output: 5, cacheRead: 100, cacheWrite: 20, totalTokens: 135 }),
+  });
+  assert.equal(result.usage?.cacheWrite, 20);
+});
+
+test('analyze reports total tokens when the classifier provides them', async () => {
+  const result = await analyze(technicalRequest, {
+    classify: classifierWithUsage({ input: 10, output: 5, cacheRead: 100, cacheWrite: 20, totalTokens: 135 }),
+  });
+  assert.equal(result.usage?.totalTokens, 135);
+});
+
+test('analyze marks reported usage as available', async () => {
+  const result = await analyze(technicalRequest, { classify: classifierWithUsage({ input: 10 }) });
+  assert.equal(result.usage?.available, true);
+});
+
+test('analyze leaves usage null when the classifier reports no usage', async () => {
+  const result = await analyze(technicalRequest, { classify: classifierWithUsage(undefined) });
+  assert.equal(result.usage, null);
+});
+
+test('analyze labels a finite Pi-reported cost with source pi_reported', async () => {
+  const result = await analyze(technicalRequest, {
+    classify: classifierWithUsage({ input: 10, cost: { total: 0.002 } }),
+  });
+  assert.equal(result.usage?.piReported.source, 'pi_reported');
+});
+
+test('analyze exposes a finite Pi-reported cost amount', async () => {
+  const result = await analyze(technicalRequest, {
+    classify: classifierWithUsage({ input: 10, cost: { total: 0.002 } }),
+  });
+  assert.equal(result.usage?.piReported.amountUsd, 0.002);
+});
+
+test('analyze marks a finite Pi-reported cost as available', async () => {
+  const result = await analyze(technicalRequest, {
+    classify: classifierWithUsage({ input: 10, cost: { total: 0.002 } }),
+  });
+  assert.equal(result.usage?.piReported.available, true);
+});
+
+test('analyze preserves the legacy costUsd field for a finite Pi cost', async () => {
+  const result = await analyze(technicalRequest, {
+    classify: classifierWithUsage({ input: 10, cost: { total: 0.002 } }),
+  });
+  assert.equal(result.usage?.costUsd, 0.002);
+});
+
+test('analyze leaves costUsd null when the classifier reports no cost', async () => {
+  const result = await analyze(technicalRequest, { classify: classifierWithUsage({ input: 10 }) });
+  assert.equal(result.usage?.costUsd, null);
+});
+
+test('analyze marks an empty Pi cost object as unavailable rather than free', async () => {
+  const result = await analyze(technicalRequest, {
+    classify: classifierWithUsage({ input: 10, cost: {} }),
+  });
+  assert.equal(result.usage?.piReported.available, false);
+});
+
+test('analyze preserves a valid zero Pi cost as a reported zero', async () => {
+  const result = await analyze(technicalRequest, {
+    classify: classifierWithUsage({ input: 10, cost: { total: 0 } }),
+  });
+  assert.equal(result.usage?.costUsd, 0);
+});
+
+test('analyze does not promote a Pi-reported cost to billedCostUsd', async () => {
+  const result = await analyze(technicalRequest, {
+    classify: classifierWithUsage({ input: 10, cost: { total: 0.002 } }),
+  });
+  assert.equal(result.billedCostUsd, null);
+});
+
+test('analyze notes explain that a Pi-reported cost is not a bill', async () => {
+  const result = await analyze(technicalRequest, { classify: classifierWithUsage({ input: 10 }) });
+  assert.equal(result.notes.some((n) => /pi_reported/i.test(n) && /not a bill/i.test(n)), true);
+});
+
+test('inspectResult retains the legacy usage cost field of a saved schema 1 result', () => {
+  const dir = tempDir();
+  const out = join(dir, 'result.json');
+  writeFileSync(
+    out,
+    JSON.stringify({
+      schemaVersion: 1,
+      classification: 'technical',
+      catalogVersion: 'triz-software-1',
+      usage: { input: 1, output: 2, totalTokens: 3, costUsd: 0.001 },
+    }),
+  );
+  assert.equal(inspectResult(out).usage?.costUsd, 0.001);
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test('a classifier that exceeds the timeout yields an uncertain result', async () => {
   const classify = () => new Promise<never>(() => {});
   const result = await analyze(technicalRequest, { classify, timeoutMs: 25 });

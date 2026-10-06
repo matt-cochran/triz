@@ -752,21 +752,50 @@ export function hashInput(input: unknown): string {
 export type NormalizedUsage = {
   input: number;
   output: number;
+  cacheRead: number;
+  cacheWrite: number;
   totalTokens: number;
+  /** True only when the Pi SDK reported a usage object. When false the token
+   * counts are unknown zeros, not authoritative zeros. */
+  available: boolean;
+  /** Legacy flat Pi-reported total in USD. null means the Pi SDK reported no
+   * finite cost; 0 means it reported a cost of zero. Never a bill. */
   costUsd: number | null;
+  /** Labelled Pi-reported cost. `available:false` means the cost is unknown,
+   * not that the call was free. */
+  piReported: PiReportedCost;
+};
+
+export type PiReportedCost = {
+  amountUsd: number | null;
+  available: boolean;
+  source: 'pi_reported';
 };
 
 function num(v: unknown): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : 0;
 }
 
+function finiteOrNull(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
 export function normalizeUsage(u: any): NormalizedUsage | null {
   if (!u || typeof u !== 'object') return null;
-  const cost =
-    u.cost && typeof u.cost === 'object' && typeof u.cost.total === 'number' && Number.isFinite(u.cost.total)
-      ? u.cost.total
-      : null;
-  return { input: num(u.input), output: num(u.output), totalTokens: num(u.totalTokens), costUsd: cost };
+  // A cost object only counts when it carries a finite numeric total, so an
+  // empty `{}` or a non-numeric total cannot masquerade as a reported zero.
+  const cost = u.cost && typeof u.cost === 'object' ? u.cost : null;
+  const total = cost ? finiteOrNull(cost.total) : null;
+  return {
+    input: num(u.input),
+    output: num(u.output),
+    cacheRead: num(u.cacheRead),
+    cacheWrite: num(u.cacheWrite),
+    totalTokens: num(u.totalTokens),
+    available: true,
+    costUsd: total,
+    piReported: { amountUsd: total, available: total !== null, source: 'pi_reported' },
+  };
 }
 
 export type Provenance = { provider: string; model: string };
@@ -836,7 +865,7 @@ export function buildResult(input: {
       ...verdict.notes,
       ...(provenance.model.startsWith('~') ? ['Provider reported a model alias; the resolved underlying model version is unavailable.'] : []),
       'Classifier output is probabilistic inference; only the catalog mapping is deterministic.',
-      'Billed cost is unknown; usage cost, when present, is a catalog estimate and not a bill.',
+      'Billed cost is unknown: no upstream provider billing response is captured. A finite Pi SDK usage cost is labelled as Pi-reported (source: pi_reported) and is an estimate, not a bill; an absent cost is unknown, not free.',
     ],
   };
 }
