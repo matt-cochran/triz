@@ -97,10 +97,21 @@ triz inspect result.json
 
 # Print the curated catalog:
 triz catalog
+
+# Show help (global or per command):
+triz --help
+triz analyze --help
 ```
 
 Options: `--offline <response.json>`, `--out <result.json>`,
 `--provider <provider>`, `--model <model>`, `--timeout-ms <n>`.
+
+Every command also accepts `-h`/`--help`, which prints usage to stdout and
+exits `0` without reading input files, writing output, or contacting a
+provider. Arguments are validated before any file or provider action: unknown
+options (including short flags), missing option values, a non-numeric or
+non-positive `--timeout-ms`, and excess positional arguments all fail with a
+non-zero exit code.
 
 The same CLI can be run directly from the compiled file with `node
 dist/triz.js <command>`. npm bin shims and symlinks are recognized on all

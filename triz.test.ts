@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readdirSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -21,6 +21,27 @@ import {
 } from './triz.ts';
 
 const trizPath = fileURLToPath(new URL('./triz.ts', import.meta.url));
+
+function runTriz(args: string[]) {
+  return spawnSync(process.execPath, [trizPath, ...args], { encoding: 'utf8' });
+}
+
+function analyzeFixture(dir: string): { requestPath: string; fixturePath: string } {
+  const requestPath = join(dir, 'request.json');
+  const fixturePath = join(dir, 'response.json');
+  writeFileSync(requestPath, JSON.stringify(technicalRequest));
+  writeFileSync(fixturePath, JSON.stringify(technicalVerdict));
+  return { requestPath, fixturePath };
+}
+
+function resultFixture(dir: string): string {
+  const resultPath = join(dir, 'result.json');
+  writeFileSync(
+    resultPath,
+    JSON.stringify({ schemaVersion: 1, classification: 'technical', catalogVersion: 'triz-software-2' }),
+  );
+  return resultPath;
+}
 
 const technicalRequest = {
   evidence: [
@@ -420,5 +441,134 @@ test('CLI analyze writes a result that a fresh process can inspect', () => {
   });
   const inspected = spawnSync(process.execPath, [trizPath, 'inspect', outPath], { encoding: 'utf8' });
   assert.equal(JSON.parse(inspected.stdout).classification, 'technical');
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// --- CLI help ---------------------------------------------------------------
+
+test('top-level --help exits zero', () => {
+  assert.equal(runTriz(['--help']).status, 0);
+});
+
+test('top-level --help prints top-level usage to stdout', () => {
+  assert.match(runTriz(['--help']).stdout, /Usage: triz/);
+});
+
+test('top-level -h exits zero', () => {
+  assert.equal(runTriz(['-h']).status, 0);
+});
+
+test('analyze --help exits zero', () => {
+  assert.equal(runTriz(['analyze', '--help']).status, 0);
+});
+
+test('analyze --help prints analyze usage to stdout', () => {
+  assert.match(runTriz(['analyze', '--help']).stdout, /Usage: triz analyze/);
+});
+
+test('analyze -h exits zero', () => {
+  assert.equal(runTriz(['analyze', '-h']).status, 0);
+});
+
+test('inspect --help exits zero', () => {
+  assert.equal(runTriz(['inspect', '--help']).status, 0);
+});
+
+test('inspect --help prints inspect usage to stdout', () => {
+  assert.match(runTriz(['inspect', '--help']).stdout, /Usage: triz inspect/);
+});
+
+test('catalog --help exits zero', () => {
+  assert.equal(runTriz(['catalog', '--help']).status, 0);
+});
+
+test('catalog -h prints catalog usage to stdout', () => {
+  assert.match(runTriz(['catalog', '-h']).stdout, /Usage: triz catalog/);
+});
+
+// --- CLI argument validation ------------------------------------------------
+
+test('top-level command rejects an unknown option', () => {
+  assert.notEqual(runTriz(['--bogus']).status, 0);
+});
+
+test('analyze rejects an unknown short flag', () => {
+  const dir = tempDir();
+  const { requestPath, fixturePath } = analyzeFixture(dir);
+  assert.notEqual(runTriz(['analyze', requestPath, '--offline', fixturePath, '-x']).status, 0);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('inspect rejects an unknown option', () => {
+  const dir = tempDir();
+  const resultPath = resultFixture(dir);
+  assert.notEqual(runTriz(['inspect', resultPath, '--bogus']).status, 0);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('catalog rejects an unknown option', () => {
+  assert.notEqual(runTriz(['catalog', '--bogus']).status, 0);
+});
+
+test('analyze rejects a non-numeric timeout value', () => {
+  const dir = tempDir();
+  const { requestPath, fixturePath } = analyzeFixture(dir);
+  assert.notEqual(runTriz(['analyze', requestPath, '--offline', fixturePath, '--timeout-ms', 'soon']).status, 0);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('analyze rejects an excess positional argument', () => {
+  const dir = tempDir();
+  const { requestPath, fixturePath } = analyzeFixture(dir);
+  assert.notEqual(runTriz(['analyze', requestPath, '--offline', fixturePath, 'extra']).status, 0);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('inspect rejects an excess positional argument', () => {
+  const dir = tempDir();
+  const resultPath = resultFixture(dir);
+  assert.notEqual(runTriz(['inspect', resultPath, 'extra']).status, 0);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('catalog rejects an excess positional argument', () => {
+  assert.notEqual(runTriz(['catalog', 'extra']).status, 0);
+});
+
+test('analyze with an unknown option writes no output file', () => {
+  const dir = tempDir();
+  const { requestPath, fixturePath } = analyzeFixture(dir);
+  const outPath = join(dir, 'result.json');
+  runTriz(['analyze', requestPath, '--offline', fixturePath, '--out', outPath, '--bogus']);
+  assert.equal(existsSync(outPath), false);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('analyze with a missing option value writes no output file', () => {
+  const dir = tempDir();
+  const { requestPath, fixturePath } = analyzeFixture(dir);
+  const outPath = join(dir, 'result.json');
+  runTriz(['analyze', requestPath, '--offline', fixturePath, '--out', outPath, '--provider']);
+  assert.equal(existsSync(outPath), false);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// --- CLI existing options ---------------------------------------------------
+
+test('analyze accepts provider and model overrides', () => {
+  const dir = tempDir();
+  const { requestPath, fixturePath } = analyzeFixture(dir);
+  const outPath = join(dir, 'result.json');
+  runTriz(['analyze', requestPath, '--offline', fixturePath, '--out', outPath, '--provider', 'openrouter', '--model', '~typesafe/jev-custom']);
+  assert.equal(JSON.parse(readFileSync(outPath, 'utf8')).requested.model, '~typesafe/jev-custom');
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('analyze accepts a numeric timeout option', () => {
+  const dir = tempDir();
+  const { requestPath, fixturePath } = analyzeFixture(dir);
+  const outPath = join(dir, 'result.json');
+  runTriz(['analyze', requestPath, '--offline', fixturePath, '--out', outPath, '--timeout-ms', '1000']);
+  assert.equal(JSON.parse(readFileSync(outPath, 'utf8')).classification, 'technical');
   rmSync(dir, { recursive: true, force: true });
 });

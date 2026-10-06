@@ -1065,70 +1065,198 @@ export async function analyze(requestInput: unknown, options: AnalyzeOptions = {
 // CLI
 // ---------------------------------------------------------------------------
 
-function parseArgs(args: string[]): { positional: string[]; flags: Record<string, string | true> } {
+type CliOptionSpec = { hasValue: boolean };
+
+type CliCommandSpec = {
+  name: string;
+  options: Record<string, CliOptionSpec>;
+  minPositional: number;
+  maxPositional: number;
+  usage: string;
+};
+
+const CLI_COMMANDS: Record<string, CliCommandSpec> = {
+  analyze: {
+    name: 'analyze',
+    options: {
+      offline: { hasValue: true },
+      out: { hasValue: true },
+      provider: { hasValue: true },
+      model: { hasValue: true },
+      'timeout-ms': { hasValue: true },
+    },
+    minPositional: 1,
+    maxPositional: 1,
+    usage:
+      'Usage: triz analyze <request.json> [--offline <response.json>] [--out <result.json>] [--provider <provider>] [--model <model>] [--timeout-ms <n>]',
+  },
+  inspect: {
+    name: 'inspect',
+    options: {},
+    minPositional: 1,
+    maxPositional: 1,
+    usage: 'Usage: triz inspect <result.json>',
+  },
+  catalog: {
+    name: 'catalog',
+    options: {},
+    minPositional: 0,
+    maxPositional: 0,
+    usage: 'Usage: triz catalog',
+  },
+};
+
+const MAIN_USAGE = [
+  'Usage: triz <command> [options]',
+  '',
+  'Commands:',
+  '  analyze <request.json>  Classify a TRIZ request',
+  '  inspect <result.json>   Print a persisted result',
+  '  catalog                 Print the curated catalog',
+  '',
+  'Options:',
+  '  -h, --help              Show help',
+  '',
+  'Run "triz <command> --help" for command-specific options.',
+].join('\n');
+
+type ParsedArgs =
+  | { kind: 'help' }
+  | { kind: 'error'; message: string }
+  | { kind: 'ok'; positional: string[]; flags: Record<string, string | true> };
+
+/** Strict per-command argument parser. It recognizes `-h`/`--help`, rejects
+ * unknown options (including short flags), missing option values, and excess
+ * positionals, and performs no filesystem or provider action itself. */
+function parseCommandArgs(spec: CliCommandSpec, args: string[]): ParsedArgs {
   const positional: string[] = [];
   const flags: Record<string, string | true> = {};
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
+    if (a === '--help' || a === '-h') return { kind: 'help' };
     if (a.startsWith('--')) {
-      const key = a.slice(2);
-      const next = args[i + 1];
-      if (next !== undefined && !next.startsWith('--')) {
-        flags[key] = next;
-        i++;
+      const eq = a.indexOf('=');
+      const name = eq === -1 ? a.slice(2) : a.slice(2, eq);
+      const inlineValue = eq === -1 ? undefined : a.slice(eq + 1);
+      const option = spec.options[name];
+      if (!name || !option) return { kind: 'error', message: `unknown option: --${name}` };
+      if (option.hasValue) {
+        if (inlineValue !== undefined) {
+          if (!inlineValue.trim()) return { kind: 'error', message: "option requires a nonempty value" };
+          flags[name] = inlineValue;
+        } else {
+          const next = args[i + 1];
+          if (next === undefined || next.startsWith('-')) {
+            return { kind: 'error', message: `option --${name} requires a value` };
+          }
+          flags[name] = next;
+          i++;
+        }
       } else {
-        flags[key] = true;
+        if (inlineValue !== undefined) return { kind: 'error', message: `option --${name} does not take a value` };
+        flags[name] = true;
       }
+    } else if (a.startsWith('-') && a !== '-') {
+      return { kind: 'error', message: `unknown option: ${a}` };
     } else {
       positional.push(a);
     }
   }
-  return { positional, flags };
+  if (positional.length < spec.minPositional) {
+    return { kind: 'error', message: `${spec.name} requires a path argument` };
+  }
+  if (positional.length > spec.maxPositional) {
+    return { kind: 'error', message: `${spec.name} accepts at most ${spec.maxPositional} positional argument(s)` };
+  }
+  return { kind: 'ok', positional, flags };
 }
 
-async function cliAnalyze(args: string[]): Promise<number> {
-  const { positional, flags } = parseArgs(args);
-  if (!positional[0]) {
-    console.error('analyze requires a request.json path');
+function reportCliError(message: string, usage: string): void {
+  console.error(`error: ${message}`);
+  console.error(usage);
+}
+
+async function cliAnalyze(spec: CliCommandSpec, args: string[]): Promise<number> {
+  const parsed = parseCommandArgs(spec, args);
+  if (parsed.kind === 'help') {
+    console.log(spec.usage);
+    return 0;
+  }
+  if (parsed.kind === 'error') {
+    reportCliError(parsed.message, spec.usage);
     return 1;
   }
-  const requestInput = JSON.parse(readFileSync(positional[0], 'utf8'));
+  const { positional, flags } = parsed;
   const options: AnalyzeOptions = {};
   if (typeof flags.offline === 'string') options.offline = flags.offline;
   if (typeof flags.out === 'string') options.out = flags.out;
   if (typeof flags.provider === 'string') options.provider = flags.provider;
   if (typeof flags.model === 'string') options.model = flags.model;
-  if (typeof flags['timeout-ms'] === 'string') options.timeoutMs = Number(flags['timeout-ms']);
+  if (typeof flags['timeout-ms'] === 'string') {
+    const timeoutMs = Number(flags['timeout-ms']);
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      reportCliError('--timeout-ms requires a positive number', spec.usage);
+      return 1;
+    }
+    options.timeoutMs = timeoutMs;
+  }
+  const requestInput = JSON.parse(readFileSync(positional[0], 'utf8'));
   const result = await analyze(requestInput, options);
   console.log(JSON.stringify(result, null, 2));
   return 0;
 }
 
-function cliInspect(args: string[]): number {
-  const { positional } = parseArgs(args);
-  if (!positional[0]) {
-    console.error('inspect requires a result.json path');
+function cliInspect(spec: CliCommandSpec, args: string[]): number {
+  const parsed = parseCommandArgs(spec, args);
+  if (parsed.kind === 'help') {
+    console.log(spec.usage);
+    return 0;
+  }
+  if (parsed.kind === 'error') {
+    reportCliError(parsed.message, spec.usage);
     return 1;
   }
-  const result = inspectResult(positional[0]);
+  const result = inspectResult(parsed.positional[0]);
   console.log(JSON.stringify(result, null, 2));
+  return 0;
+}
+
+function cliCatalog(spec: CliCommandSpec, args: string[]): number {
+  const parsed = parseCommandArgs(spec, args);
+  if (parsed.kind === 'help') {
+    console.log(spec.usage);
+    return 0;
+  }
+  if (parsed.kind === 'error') {
+    reportCliError(parsed.message, spec.usage);
+    return 1;
+  }
+  console.log(JSON.stringify(CATALOG, null, 2));
   return 0;
 }
 
 export async function runCli(argv: string[]): Promise<number> {
   const [command, ...rest] = argv;
-  if (command === 'analyze') return cliAnalyze(rest);
-  if (command === 'inspect') return cliInspect(rest);
-  if (command === 'catalog') {
-    console.log(JSON.stringify(CATALOG, null, 2));
+  if (command === undefined) {
+    console.error(MAIN_USAGE);
+    return 1;
+  }
+  if (command === '--help' || command === '-h' || command === 'help') {
+    console.log(MAIN_USAGE);
     return 0;
   }
-  console.error(
-    'Usage: triz.ts analyze <request.json> [--offline <response.json>] [--out <result.json>] [--provider <p>] [--model <m>] [--timeout-ms <n>]',
-  );
-  console.error('       triz.ts inspect <result.json>');
-  console.error('       triz.ts catalog');
-  return 1;
+  if (command.startsWith('-')) {
+    reportCliError(`unknown option: ${command}`, MAIN_USAGE);
+    return 1;
+  }
+  const spec = CLI_COMMANDS[command];
+  if (!spec) {
+    reportCliError(`unknown command: ${command}`, MAIN_USAGE);
+    return 1;
+  }
+  if (spec.name === 'analyze') return cliAnalyze(spec, rest);
+  if (spec.name === 'inspect') return cliInspect(spec, rest);
+  return cliCatalog(spec, rest);
 }
 
 /** True when this module is the process entry point. Resolving real paths

@@ -130,7 +130,7 @@ test('packed tarball contents match the published file whitelist', () => {
 // --- Published package metadata --------------------------------------------
 
 test('published package points the triz bin at the compiled CLI', () => {
-  assert.equal(pkg.bin.triz, './dist/triz.js');
+  assert.equal(pkg.bin.triz, 'dist/triz.js');
 });
 
 test('published package declares no runtime dependencies', () => {
