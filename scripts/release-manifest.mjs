@@ -42,7 +42,7 @@ if (typeof flags.tarball !== 'string') {
 }
 
 const tarball = resolve(flags.tarball);
-const assetName = String(flags['asset-name'] ?? `${pkg.name}-v${version}-node.tgz`);
+const assetName = String(flags['asset-name'] ?? `triz-v${version}-node.tgz`);
 const tag = String(flags.tag ?? process.env.GITHUB_REF_NAME ?? `v${version}`);
 const commit = String(flags.sha ?? process.env.GITHUB_SHA ?? 'unknown');
 const outDir = resolve(String(flags['out-dir'] ?? join(root, '.artifacts')));

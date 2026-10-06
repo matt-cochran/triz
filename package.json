@@ -1,6 +1,6 @@
 {
-  "name": "triz",
-  "version": "0.2.0",
+  "name": "@matthew-cochran/triz",
+  "version": "0.2.1",
   "description": "Architecture-independent TRIZ contradiction classification CLI and library, compiled to JavaScript.",
   "type": "module",
   "main": "./dist/triz.js",
@@ -46,5 +46,8 @@
   "homepage": "https://github.com/matt-cochran/triz#readme",
   "bugs": {
     "url": "https://github.com/matt-cochran/triz/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

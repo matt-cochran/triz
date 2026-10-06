@@ -46,7 +46,7 @@ jobs:
           VERSION="$(node -p "require('./package.json').version")"
           mkdir -p .artifacts
           npm pack --pack-destination .artifacts
-          mv ".artifacts/triz-${VERSION}.tgz" ".artifacts/triz-v${VERSION}-node.tgz"
+          mv ".artifacts/matthew-cochran-triz-${VERSION}.tgz" ".artifacts/triz-v${VERSION}-node.tgz"
 
       - name: Generate checksums and release manifest
         shell: bash

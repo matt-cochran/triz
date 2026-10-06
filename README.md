@@ -45,6 +45,19 @@ deterministic; the result always records `inferenceDeterministic: false`.
   (`@earendil-works/pi-coding-agent`) plus normal local auth. Offline runs need
   neither.
 
+## Install from npm
+
+Requires Node.js 24 or newer. No Rust or local compilation is required.
+
+```sh
+npm install -g @matthew-cochran/triz
+triz catalog
+```
+
+For a project-local install, use `npm install @matthew-cochran/triz` and
+`npx triz catalog`. Live analysis additionally requires the provider setup
+below; catalog inspection is offline.
+
 ## Install from a GitHub release
 
 Releases publish a single Node tarball named `triz-v<version>-node.tgz`
@@ -52,15 +65,15 @@ together with `checksums.sha256` and `release-manifest.json`.
 
 ```sh
 # 1. Download the release asset, checksum file, and manifest.
-curl -LO https://github.com/matt-cochran/triz/releases/download/v0.2.0/triz-v0.2.0-node.tgz
-curl -LO https://github.com/matt-cochran/triz/releases/download/v0.2.0/checksums.sha256
-curl -LO https://github.com/matt-cochran/triz/releases/download/v0.2.0/release-manifest.json
+curl -LO https://github.com/matt-cochran/triz/releases/download/v0.2.1/triz-v0.2.1-node.tgz
+curl -LO https://github.com/matt-cochran/triz/releases/download/v0.2.1/checksums.sha256
+curl -LO https://github.com/matt-cochran/triz/releases/download/v0.2.1/release-manifest.json
 
 # 2. Verify the download (Linux: sha256sum, macOS: shasum -a 256 -c).
 sha256sum -c checksums.sha256
 
 # 3. Install the tarball without compiling anything.
-npm install -g ./triz-v0.2.0-node.tgz
+npm install -g ./triz-v0.2.1-node.tgz
 
 # 4. Run it.
 triz catalog
@@ -227,3 +240,13 @@ output is kept in ignored local artifacts. Billed cost remains unknown.
 ## Open-source project
 
 MIT licensed. See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [SUPPORT.md](SUPPORT.md). Live analysis sends supplied evidence to the configured provider; offline classification fixtures require no provider access. Results are reviewable candidate strategies, not automatic implementation decisions. GitHub release tarballs do not imply npm registry availability.
+
+## Publishing
+
+Maintainers publish the first version with `npm login` followed by
+`npm publish --access public`. Configure npm Trusted Publishing for this
+package using GitHub owner `matt-cochran`, repository `triz`, and workflow
+`publish.yml` (environment blank). Subsequent matching `vX.Y.Z` tags publish
+through GitHub Actions with provenance after the package tests pass. No
+long-lived npm token is needed in GitHub. The separate GitHub release workflow
+continues producing reviewed tarballs and checksums.
