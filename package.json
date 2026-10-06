@@ -12,7 +12,7 @@
     }
   },
   "bin": {
-    "triz": "./dist/triz.js"
+    "triz": "dist/triz.js"
   },
   "files": [
     "dist/triz.js",
