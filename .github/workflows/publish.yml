@@ -1,60 +1,227 @@
-name: Publish
+name: Release
 
-# Manual or tag-driven npm publishing with provenance. This workflow never runs
-# on its own; a maintainer either pushes a `vX.Y.Z` tag or dispatches it with a
-# matching tag input. It gates on the packaged tests, pins the tag to the
-# package version, skips an already-published version, and only then publishes.
+# One version tag, one release: pushing `vX.Y.Z` (or dispatching this workflow
+# with a `vX.Y.Z` tag input, e.g. to backfill a version) gates on the tag
+# matching package.json and on the platform tests, packs a single npm tarball,
+# publishes exactly that tarball to npm with provenance, and attaches the same
+# bytes to a published (non-draft) GitHub release with these assets:
 #
-# One-time setup (see README "Publishing" for details):
-#   1. `npm login` locally as a maintainer of the @matthew-cochran scope.
-#   2. On npmjs.com, configure this repository and workflow as a Trusted
-#      Publisher for @matthew-cochran/triz (GitHub Actions, environment blank,
-#      workflow `publish.yml`). No NPM_TOKEN secret is needed; OIDC supplies a
-#      short-lived credential via `id-token: write`.
+#   triz-vX.Y.Z-node.tgz   the npm-packed tarball
+#   checksums.sha256       sha256sum lines covering every other asset
+#   release-manifest.json  { version, tag, commit (full source SHA), ... }
+#
+# Downstream checksum-verifying installers depend on exactly these names and
+# fields; scripts/verify-release-assets.mjs fails the release otherwise.
+#
+# A version already on npm is not republished: its registry tarball becomes the
+# release asset instead, so the GitHub release always carries the bytes npm
+# serves. Re-running a tag is therefore safe.
+#
+# This file must stay named publish.yml: npm Trusted Publishing for
+# @matthew-cochran/triz is bound to it (GitHub Actions, owner matt-cochran,
+# repository triz, workflow publish.yml, environment blank). No NPM_TOKEN
+# secret is needed; OIDC supplies a short-lived credential via
+# `id-token: write`. See CONTRIBUTING.md "Releases".
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag to publish (vX.Y.Z); required for manual runs
+        description: Release tag to build and publish (vX.Y.Z); must already exist
         required: true
         type: string
   push:
     tags:
-      - 'v*'
+      - 'v*.*.*'
 
 permissions:
   contents: read
-  id-token: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  SOURCE_REF: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
 
 jobs:
-  publish:
-    name: Publish to npm
+  verify:
+    name: Verify the tag matches the package version
     runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      commit: ${{ steps.meta.outputs.commit }}
+    steps:
+      # The release source is the tag; the release tooling is this workflow's
+      # own revision, so a backfilled older tag still gets current checks.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_REF }}
+      - uses: actions/checkout@v4
+        with:
+          path: .release-tools
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Fail unless the tag is v<package.json version>
+        run: node .release-tools/scripts/verify-tag-version.mjs --package-dir . --tag "$RELEASE_TAG"
+      - name: Record the version and full source commit
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  platform-tests:
+    name: Test on ${{ matrix.os }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-22.04-arm, macos-15-intel, macos-15, windows-latest, windows-11-arm]
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ env.SOURCE_REF }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  package:
+    name: Pack and verify the release assets
+    needs: [verify, platform-tests]
+    runs-on: ubuntu-22.04
+    outputs:
+      published: ${{ steps.published.outputs.published }}
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+      COMMIT: ${{ needs.verify.outputs.commit }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_REF }}
+      - uses: actions/checkout@v4
+        with:
+          path: .release-tools
       - uses: actions/setup-node@v4
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
           cache: npm
-      - run: npm ci
-      - name: Gate on the packaged tests
-        run: npm test
-      - name: Verify the release tag matches the package version
-        env:
-          INPUT_TAG: ${{ inputs.tag }}
-        run: node scripts/verify-tag-version.mjs
+      - name: Check whether this version is already on npm
+        id: published
+        run: node .release-tools/scripts/check-published.mjs --package-dir .
+      - name: Pack the tarball (the registry's copy when already published)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .pack
+          if [ "${{ steps.published.outputs.published }}" = "true" ]; then
+            spec="$(node -p "require('./package.json').name")@${VERSION}"
+            # The registry records the commit it was packed from; the tag must
+            # point at that commit, or the manifest would describe other source.
+            git_head="$(npm view "$spec" gitHead)"
+            if [ -n "$git_head" ] && [ "$git_head" != "$COMMIT" ]; then
+              echo "::error::$spec was published from $git_head, but $RELEASE_TAG points at $COMMIT"
+              exit 1
+            fi
+            npm pack "$spec" --pack-destination .pack
+          else
+            npm ci
+            npm pack --pack-destination .pack
+          fi
+          ls .pack/*.tgz
+      - name: Generate the manifest and checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          tarball="$(ls .pack/*.tgz)"
+          node .release-tools/scripts/release-manifest.mjs \
+            --package-dir . \
+            --tarball "$tarball" \
+            --tag "$RELEASE_TAG" \
+            --sha "$COMMIT" \
+            --out-dir .artifacts
+      - name: Verify the release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          node .release-tools/scripts/verify-release-assets.mjs --dir .artifacts --tag "$RELEASE_TAG" --commit "$COMMIT"
+          (cd .artifacts && sha256sum -c checksums.sha256)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: .artifacts/
+          if-no-files-found: error
+
+  npm:
+    name: Publish to npm
+    needs: [verify, package]
+    if: needs.package.outputs.published != 'true'
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: .artifacts
       - name: Use a provenance-capable npm only when needed
         run: |
           if ! node -e "const [a,b,c]=require('node:child_process').execSync('npm --version').toString().trim().split('.').map(Number);process.exit(a>11||(a===11&&(b>5||(b===5&&c>=1)))?0:1)"; then
             npm install -g npm@latest
           fi
-      - name: Check whether this version is already published
-        id: published
-        run: node scripts/check-published.mjs
-      - name: Publish with provenance
-        if: steps.published.outputs.published != 'true'
-        run: npm publish --provenance --access public
+      - name: Publish the verified tarball with provenance
+        run: npm publish ".artifacts/triz-v${VERSION}-node.tgz" --provenance --access public
+
+  github-release:
+    name: Publish the GitHub release
+    needs: [verify, package, npm]
+    if: ${{ !cancelled() && needs.package.result == 'success' && (needs.npm.result == 'success' || needs.npm.result == 'skipped') }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: .artifacts
+      - name: Create or update the release with the verified assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          assets=(".artifacts/triz-v${VERSION}-node.tgz" .artifacts/checksums.sha256 .artifacts/release-manifest.json)
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+            gh release edit "$RELEASE_TAG" --draft=false
+          else
+            gh release create "$RELEASE_TAG" "${assets[@]}" \
+              --verify-tag \
+              --title "triz $RELEASE_TAG" \
+              --generate-notes
+          fi
+      - name: Verify the published release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .published
+          gh release download "$RELEASE_TAG" --dir .published \
+            --pattern "triz-v${VERSION}-node.tgz" --pattern checksums.sha256 --pattern release-manifest.json
+          (cd .published && sha256sum -c checksums.sha256)

@@ -7,11 +7,13 @@
 
 import { appendFileSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+const dirFlag = process.argv.indexOf('--package-dir');
+const packageDir = resolve(dirFlag === -1 ? root : process.argv[dirFlag + 1]);
+const pkg = JSON.parse(readFileSync(join(packageDir, 'package.json'), 'utf8'));
 const spec = `${pkg.name}@${pkg.version}`;
 
 let published = false;

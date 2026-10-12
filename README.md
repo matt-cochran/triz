@@ -80,8 +80,10 @@ triz catalog
 ```
 
 `npm install <tarball>` also works in a project or a temporary prefix. The
-manifest records the version, tag, commit SHA, asset digest, the Node engine,
-and the architecture-independent targets.
+manifest records the version, tag, full commit SHA, asset digest, the Node
+engine, and the architecture-independent targets. `checksums.sha256` covers
+both the tarball and the manifest. A release made by the publish workflow carries
+the same tarball that npm serves for that version.
 
 ## Run
 
@@ -318,14 +320,13 @@ output is kept in ignored local artifacts. Billed cost remains unknown.
 
 ## Open-source project
 
-MIT licensed. See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [SUPPORT.md](SUPPORT.md). Live analysis sends supplied evidence to the configured provider; offline classification fixtures require no provider access. Results are reviewable candidate strategies, not automatic implementation decisions. GitHub release tarballs do not imply npm registry availability.
+MIT licensed. See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [SUPPORT.md](SUPPORT.md). Live analysis sends supplied evidence to the configured provider; offline classification fixtures require no provider access. Results are reviewable candidate strategies, not automatic implementation decisions.
 
 ## Publishing
 
-Maintainers publish the first version with `npm login` followed by
-`npm publish --access public`. Configure npm Trusted Publishing for this
-package using GitHub owner `matt-cochran`, repository `triz`, and workflow
-`publish.yml` (environment blank). Subsequent matching `vX.Y.Z` tags publish
-through GitHub Actions with provenance after the package tests pass. No
-long-lived npm token is needed in GitHub. The separate GitHub release workflow
-continues producing reviewed tarballs and checksums.
+A single `vX.Y.Z` tag publishes to npm (with provenance, through npm Trusted
+Publishing bound to the `publish.yml` workflow; no long-lived npm token is
+stored in GitHub) and creates the matching GitHub release with the tarball,
+checksums, and manifest. The workflow fails when the tag and the package.json
+version disagree. The step-by-step procedure, including backfilling a release
+for a version already on npm, is in [CONTRIBUTING.md](CONTRIBUTING.md#releases).

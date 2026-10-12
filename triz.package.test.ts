@@ -165,16 +165,23 @@ test('published package declares no architecture-specific os or cpu restriction'
 
 // --- Release manifest -------------------------------------------------------
 
-function buildManifest(): Record<string, any> {
-  const packed = packOnce();
+const releaseTag = `v${pkg.version}`;
+const releaseCommit = '0123456789abcdef0123456789abcdef01234567';
+
+function runScript(script: string, args: string[]) {
+  return spawnSync(process.execPath, [join(root, 'scripts', script), ...args], { cwd: root, encoding: 'utf8' });
+}
+
+/** Generate the release assets for the packed tarball into a new directory. */
+function buildReleaseAssets(tag = releaseTag, sha = releaseCommit): string {
   const out = tempDir('triz-manifest-');
-  const res = spawnSync(
-    process.execPath,
-    [join(root, 'scripts', 'release-manifest.mjs'), '--tarball', packed.tgz, '--out-dir', out, '--tag', `v${pkg.version}`, '--sha', 'testsha'],
-    { cwd: root, encoding: 'utf8' },
-  );
+  const res = runScript('release-manifest.mjs', ['--tarball', packOnce().tgz, '--out-dir', out, '--tag', tag, '--sha', sha]);
   if (res.status !== 0) throw new Error(`manifest failed:\n${res.stderr || res.stdout}`);
-  return JSON.parse(readFileSync(join(out, 'release-manifest.json'), 'utf8'));
+  return out;
+}
+
+function buildManifest(): Record<string, any> {
+  return JSON.parse(readFileSync(join(buildReleaseAssets(), 'release-manifest.json'), 'utf8'));
 }
 
 test('release manifest records the sha256 digest of the release asset', () => {
@@ -195,6 +202,62 @@ test('release manifest lists the six architecture-independent runner targets', (
     'win32-x64',
     'win32-arm64',
   ]);
+});
+
+test('release manifest records the version, tag, and full source commit', () => {
+  const { version, tag, commit } = buildManifest();
+  assert.deepEqual({ version, tag, commit }, { version: pkg.version, tag: releaseTag, commit: releaseCommit });
+});
+
+test('release manifest refuses a tag that does not match the package version', () => {
+  const out = tempDir('triz-manifest-');
+  const res = runScript('release-manifest.mjs', ['--tarball', packOnce().tgz, '--out-dir', out, '--tag', 'v0.0.0-mismatch', '--sha', releaseCommit]);
+  assert.notEqual(res.status, 0);
+});
+
+test('release manifest refuses an abbreviated commit', () => {
+  const out = tempDir('triz-manifest-');
+  const res = runScript('release-manifest.mjs', ['--tarball', packOnce().tgz, '--out-dir', out, '--tag', releaseTag, '--sha', 'abc1234']);
+  assert.notEqual(res.status, 0);
+});
+
+test('release checksums cover the tarball and the manifest', () => {
+  const sums = readFileSync(join(buildReleaseAssets(), 'checksums.sha256'), 'utf8');
+  assert.deepEqual(
+    sums.trim().split('\n').map((line) => line.split('  ')[1]),
+    [`triz-v${pkg.version}-node.tgz`, 'release-manifest.json'],
+  );
+});
+
+test('release asset verification accepts the generated assets', () => {
+  const dir = buildReleaseAssets();
+  assert.equal(runScript('verify-release-assets.mjs', ['--dir', dir, '--tag', releaseTag, '--commit', releaseCommit]).status, 0);
+});
+
+test('release asset verification rejects a tampered tarball', () => {
+  const dir = buildReleaseAssets();
+  writeFileSync(join(dir, `triz-v${pkg.version}-node.tgz`), 'tampered');
+  assert.notEqual(runScript('verify-release-assets.mjs', ['--dir', dir, '--tag', releaseTag]).status, 0);
+});
+
+test('release asset verification rejects a manifest from another commit', () => {
+  const dir = buildReleaseAssets();
+  const other = 'f'.repeat(40);
+  assert.notEqual(runScript('verify-release-assets.mjs', ['--dir', dir, '--tag', releaseTag, '--commit', other]).status, 0);
+});
+
+test('release asset verification rejects an extra asset', () => {
+  const dir = buildReleaseAssets();
+  writeFileSync(join(dir, 'notes.txt'), 'extra');
+  assert.notEqual(runScript('verify-release-assets.mjs', ['--dir', dir, '--tag', releaseTag]).status, 0);
+});
+
+test('release tag check rejects a tag that does not match the package version', () => {
+  assert.notEqual(runScript('verify-tag-version.mjs', ['--tag', 'v0.0.0-mismatch']).status, 0);
+});
+
+test('release tag check accepts the tag for the package version', () => {
+  assert.equal(runScript('verify-tag-version.mjs', ['--tag', releaseTag]).status, 0);
 });
 
 // --- Installable package ----------------------------------------------------
