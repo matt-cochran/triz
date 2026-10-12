@@ -104,6 +104,9 @@ triz analyze --help
 
 # Print the installed version (`triz <version>`):
 triz --version
+
+# Install the agent skills for Claude Code in this repository:
+triz skills install --target claude --project .
 ```
 
 Options: `--offline <response.json>`, `--out <result.json>`,
@@ -122,6 +125,45 @@ non-zero exit code.
 The same CLI can be run directly from the compiled file with `node
 dist/triz.js <command>`. npm bin shims and symlinks are recognized on all
 platforms, including Windows `.cmd`/`.ps1` shims.
+
+## Agent skills
+
+The package ships two [Agent Skills](https://agentskills.io) under `skills/`:
+
+- `triz`: the method reference. When TRIZ applies, the offline and paid
+  commands, and the request and result formats.
+- `triz-contradiction`: the step-by-step workflow, from naming the improving
+  and worsening parameters to attaching the saved result to the decision record.
+
+Install them for your agent tool with:
+
+```sh
+triz skills install --target <claude|codex|cursor|copilot|gemini|agents-md|all> (--project <dir> | --user) [--dry-run] [--force]
+triz skills uninstall --target <target> (--project <dir> | --user) [--dry-run]
+triz skills list [--project <dir> | --user]
+```
+
+| Target | Project scope | User scope |
+| --- | --- | --- |
+| `claude` | `.claude/skills/` | `~/.claude/skills/` |
+| `codex` | `.agents/skills/` | `~/.agents/skills/` |
+| `cursor` | `.cursor/skills/` | `~/.cursor/skills/` |
+| `copilot` | `.github/skills/` | `~/.copilot/skills/` |
+| `gemini` | `.agents/skills/` + `.gemini/commands/triz-*.toml` | same under `~` |
+| `agents-md` | a `<!-- triz:begin -->` … `<!-- triz:end -->` block in `AGENTS.md` + `.agents/skills/` | not available |
+| `all` | `.claude/skills/` + `.agents/skills/` | same under `~` |
+
+Each skills directory gets a `.triz-skills.json` manifest
+(`{ "schema": 1, "triz_version", "targets", "files": { "<path>": "<sha256>" } }`).
+A reinstall replaces only files whose current hash still matches the manifest.
+Files you edited, and files triz did not write, are reported as skipped and
+left alone unless you pass `--force`. Uninstall removes only files the manifest
+owns and still match, and keeps a directory shared by another target (for
+example `.agents/skills/` used by both `codex` and `gemini`) until the last
+target is uninstalled. Every change is planned before the first write, and each
+file is written atomically. `--dry-run` reports the plan and writes nothing.
+The installer never writes MCP configuration. `list` reports installs under
+the user home and the current directory, or only under the scope you give.
 
 ## Request format
 
@@ -227,7 +269,7 @@ The compiled package exports the pure pieces so another tool can integrate
 without the CLI: `validateRequest`, `interpretVerdict`, `buildQuestions`,
 `adaptClassifierResponse`, `buildResult`, `hashInput`, `inspectResult`,
 `writeResultAtomic`, `validateCatalog`, `CATALOG`, `CATALOG_VERSION`,
-`PRINCIPLE_IDS`, `PHYSICAL_ROUTE_IDS`, `SCHEMA_VERSION`, `analyze`, and
+`PRINCIPLE_IDS`, `PHYSICAL_ROUTE_IDS`, `SCHEMA_VERSION`, `TRIZ_VERSION`, `analyze`, and
 `createTrizClassifier`. Use `analyze(request,
 { classify })` with an injected classifier for offline or custom transports.
 
@@ -264,8 +306,11 @@ The suite makes no paid model calls and needs no network. It covers each
 taxonomy outcome, malformed and low-confidence responses, wrong evidence IDs,
 catalog validation, usage availability with missing, zero, cached, and finite
 Pi costs, atomic persistence, a CLI analyze-then-inspect restart check, and
-atomic packaged-CLI behavior: the compiled entrypoint, tarball
-contents, package metadata, the release manifest/checksums, and installation
+the skills installer (manifest, idempotent re-runs, edit protection, `--force`,
+uninstall ownership, `--dry-run`, every target, and the `AGENTS.md` block, all
+in temporary project and home directories), and atomic packaged-CLI behavior:
+the compiled entrypoint, `--version`, tarball contents including each
+`SKILL.md`, package metadata, the release manifest/checksums, and installation
 into a temporary prefix.
 
 CI runs on Node 24 and 26 across the supported OS/architecture matrix. Live

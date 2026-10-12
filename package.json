@@ -17,6 +17,7 @@
   "files": [
     "dist/triz.js",
     "dist/triz.d.ts",
+    "skills/",
     "LICENSE",
     "README.md"
   ],

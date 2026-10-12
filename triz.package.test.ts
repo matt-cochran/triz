@@ -8,7 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,6 +16,10 @@ import { fileURLToPath } from 'node:url';
 const root = dirname(fileURLToPath(import.meta.url));
 const distCli = join(root, 'dist', 'triz.js');
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+const skillFiles = readdirSync(join(root, 'skills'))
+  .filter((name) => existsSync(join(root, 'skills', name, 'SKILL.md')))
+  .map((name) => `skills/${name}/SKILL.md`)
+  .sort();
 
 function npmCli(): string {
   return (
@@ -51,6 +55,19 @@ function packOnce(): Packed {
 
 function tempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
+}
+
+/** Install the packed tarball into a temporary prefix; returns its triz bin. */
+function installPacked(prefix: string): string {
+  const install = spawnSync(
+    process.execPath,
+    [npmCli(), 'install', '--prefix', prefix, '--no-save', '--no-audit', '--no-fund', '--ignore-scripts', packOnce().tgz],
+    { cwd: root, encoding: 'utf8' },
+  );
+  if (install.status !== 0) throw new Error(`install failed:\n${install.stderr || install.stdout}`);
+  return process.platform === 'win32'
+    ? join(prefix, 'node_modules', '.bin', 'triz.cmd')
+    : join(prefix, 'node_modules', '.bin', 'triz');
 }
 
 // --- Compiled CLI -----------------------------------------------------------
@@ -124,7 +141,12 @@ test('packed tarball contents match the published file whitelist', () => {
     'dist/triz.d.ts',
     'dist/triz.js',
     'package.json',
-  ]);
+    ...skillFiles,
+  ].sort());
+});
+
+test('packed tarball contains each shipped SKILL.md', () => {
+  assert.deepEqual(skillFiles.filter((f) => !packOnce().files.includes(f)), []);
 });
 
 // --- Published package metadata --------------------------------------------
@@ -215,4 +237,22 @@ test('packaged CLI runs after installation into a temporary prefix', () => {
 
 test('compiled CLI --version prints the package version', () => {
   assert.equal(runNode([distCli, '--version']).stdout, `triz ${pkg.version}\n`);
+});
+
+test('installed CLI installs its shipped skills into a project', () => {
+  const prefix = tempDir('triz-install-');
+  const bin = installPacked(join(prefix, 'pkg'));
+  const project = tempDir('triz-project-');
+  spawnSync(bin, ['skills', 'install', '--target', 'claude', '--project', project], {
+    cwd: prefix,
+    encoding: 'utf8',
+    shell: process.platform === 'win32',
+    env: { ...process.env, HOME: prefix, USERPROFILE: prefix },
+  });
+  assert.equal(
+    readFileSync(join(project, '.claude', 'skills', 'triz', 'SKILL.md'), 'utf8'),
+    readFileSync(join(root, 'skills', 'triz', 'SKILL.md'), 'utf8'),
+  );
+  rmSync(prefix, { recursive: true, force: true });
+  rmSync(project, { recursive: true, force: true });
 });
