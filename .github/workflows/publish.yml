@@ -1,6 +1,6 @@
 name: Release
 
-# One version tag, one release: pushing `vX.Y.Z` (or dispatching this workflow
+# One version tag, one release: pushing `vX.Y.Z` on a commit on main (or dispatching this workflow
 # with a `vX.Y.Z` tag input, e.g. to backfill a version) gates on the tag
 # matching package.json and on the platform tests, packs a single npm tarball,
 # publishes exactly that tarball to npm with provenance, and attaches the same
@@ -62,12 +62,22 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.SOURCE_REF }}
+          fetch-depth: 0
       - uses: actions/checkout@v4
         with:
           path: .release-tools
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: Fail unless the tagged commit is on main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --quiet origin main
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "::error::$RELEASE_TAG points at $(git rev-parse HEAD), which is not on main. Release tags are cut from main only."
+            exit 1
+          fi
       - name: Fail unless the tag is v<package.json version>
         run: node .release-tools/scripts/verify-tag-version.mjs --package-dir . --tag "$RELEASE_TAG"
       - name: Record the version and full source commit
