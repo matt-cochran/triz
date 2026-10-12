@@ -26,7 +26,7 @@ import {
   writeFileSync,
   writeSync,
 } from 'node:fs';
-import { homedir } from 'node:os';
+import { homedir, hostname } from 'node:os';
 import { dirname, resolve, join, basename, relative, isAbsolute, sep } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 
@@ -1340,6 +1340,11 @@ function cliCatalog(spec: CliCommandSpec, args: string[]): number {
 
 export const SKILLS_MANIFEST_FILE = '.triz-skills.json';
 export const SKILLS_MANIFEST_SCHEMA = 1;
+const SKILLS_LOCK_FILE = '.triz-skills.lock';
+const SKILLS_LOCK_STALE_MS = 10 * 60 * 1000;
+const SKILLS_LOCK_POLL_MS = 50;
+const SKILLS_LOCK_WRITE_GRACE_MS = 2000;
+const SKILLS_LOCK_WAIT_DEFAULT_MS = 5000;
 export const SKILL_TARGETS = ['claude', 'codex', 'cursor', 'copilot', 'gemini', 'agents-md', 'all'] as const;
 export type SkillTarget = (typeof SKILL_TARGETS)[number];
 
@@ -1922,31 +1927,135 @@ function requireTargetAndScope(opts: SkillsOptions): { target: SkillTarget; scop
   return { target: opts.target, scope: opts.scope };
 }
 
+/** How long a run waits for a busy lock, from TRIZ_SKILLS_LOCK_WAIT_MS. */
+function skillsLockWaitMs(): number {
+  const raw = process.env.TRIZ_SKILLS_LOCK_WAIT_MS;
+  if (raw === undefined || raw === '') return SKILLS_LOCK_WAIT_DEFAULT_MS;
+  const ms = Number(raw);
+  return Number.isInteger(ms) && ms >= 0 ? ms : SKILLS_LOCK_WAIT_DEFAULT_MS;
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** The contents of a lock that can be taken over, or null when it is live.
+ * A lock is stale when it is older than ten minutes or names a same-host
+ * process id that is no longer running. A lock without readable contents is
+ * stale only once its file is older than SKILLS_LOCK_WRITE_GRACE_MS, since a
+ * live run creates the file before it writes its owner. */
+function staleSkillsLock(path: string): Buffer | null {
+  let mtimeMs: number;
+  let bytes: Buffer;
+  try {
+    mtimeMs = statSync(path).mtimeMs;
+    bytes = readFileSync(path);
+  } catch {
+    return null;
+  }
+  let info: any;
+  try {
+    info = JSON.parse(bytes.toString('utf8'));
+  } catch {
+    info = null;
+  }
+  if (!info || typeof info !== 'object') return Date.now() - mtimeMs > SKILLS_LOCK_WRITE_GRACE_MS ? bytes : null;
+  const created = typeof info.created === 'string' ? Date.parse(info.created) : NaN;
+  if (!Number.isFinite(created) || Date.now() - created > SKILLS_LOCK_STALE_MS) return bytes;
+  if (info.host === hostname() && typeof info.pid === 'number') {
+    try {
+      process.kill(info.pid, 0);
+    } catch (e: any) {
+      if (e?.code === 'ESRCH') return bytes;
+    }
+  }
+  return null;
+}
+
+/** Create `<root>/.triz-skills.lock` with `wx`, recovering a stale lock and
+ * waiting up to `waitMs` for a live one. Returns the lock path. */
+function acquireRootLock(root: SkillRoot, waitMs: number): string {
+  mkdirSync(root.dir, { recursive: true });
+  const path = join(root.dir, SKILLS_LOCK_FILE);
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    try {
+      const fd = openSync(path, 'wx');
+      try {
+        writeSync(fd, JSON.stringify({ pid: process.pid, host: hostname(), created: new Date().toISOString() }));
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      return path;
+    } catch (e: any) {
+      if (e?.code !== 'EEXIST') throw e;
+    }
+    const stale = staleSkillsLock(path);
+    // Remove it only if it still holds what was judged stale, so a lock that
+    // another run took over in the meantime is never deleted.
+    if (stale && readIfExists(path)?.equals(stale)) {
+      rmSync(path, { force: true });
+      continue;
+    }
+    if (Date.now() >= deadline) {
+      throw Error(
+        `${path} is locked by another running triz skills command; ` +
+          `if no other run is active, delete the lock file (waited ${waitMs} ms)`,
+      );
+    }
+    sleepSync(SKILLS_LOCK_POLL_MS);
+  }
+}
+
+/** Take a lock for every root (sorted by path so concurrent runs agree on the
+ * order), run `fn`, then always release the locks and drop roots left empty. */
+function withRootLocks<T>(roots: SkillRoot[], fn: () => T): T {
+  const ordered = [...roots].sort((a, b) => (a.dir < b.dir ? -1 : a.dir > b.dir ? 1 : 0));
+  const waitMs = skillsLockWaitMs();
+  const locked: { dir: string; path: string }[] = [];
+  try {
+    for (const root of ordered) locked.push({ dir: root.dir, path: acquireRootLock(root, waitMs) });
+    return fn();
+  } finally {
+    for (const lock of locked) rmSync(lock.path, { force: true });
+    for (const lock of locked) {
+      try {
+        rmdirSync(lock.dir);
+      } catch {
+        // Not empty: it still holds someone's files.
+      }
+    }
+  }
+}
+
 function skillsInstall(opts: SkillsOptions): string[] {
   const { target, scope } = requireTargetAndScope(opts);
   const files = shippedSkillFiles();
   const names = shippedSkills(files).map((s) => s.name);
   const roots = rootsFor(target, scope);
-  // Validate and plan everything before the first write.
-  const plans = roots.map((root) => planInstallRoot(root, scope, target, opts.force, files, names));
-  const agents = target === 'agents-md' ? planInstallAgentsMd(scope.base, names, plans[0].manifest.agents_md_block, opts.force) : null;
-  const report = new SkillsReport();
-  for (const plan of plans) executeRootPlan(plan, opts.dryRun, report);
-  if (agents) executeAgentsPlan(agents, roots[0], names, opts.dryRun, report);
-  const out = [...report.lines];
-  out.push(
-    `triz ${TRIZ_VERSION} skills install --target ${target} (${scope.kind}): ${report.summary()}${opts.dryRun ? ' (dry run: nothing written)' : ''}`,
-  );
-  if (report.count('modified, skipped') + report.count('foreign, skipped') > 0) {
-    out.push('Skipped files were kept as they are; rerun with --force to overwrite them.');
-  }
-  if (target === 'all') {
+  return withRootLocks(opts.dryRun ? [] : roots, () => {
+    // Validate and plan everything before the first write.
+    const plans = roots.map((root) => planInstallRoot(root, scope, target, opts.force, files, names));
+    const agents = target === 'agents-md' ? planInstallAgentsMd(scope.base, names, plans[0].manifest.agents_md_block, opts.force) : null;
+    const report = new SkillsReport();
+    for (const plan of plans) executeRootPlan(plan, opts.dryRun, report);
+    if (agents) executeAgentsPlan(agents, roots[0], names, opts.dryRun, report);
+    const out = [...report.lines];
     out.push(
-      'Note: --target all writes .claude/skills (Claude Code) and .agents/skills (Codex, Gemini and others) only. ' +
-        'Cursor and Copilot read both directories and may list each skill twice; to avoid that, install with --target cursor or --target copilot alone.',
+      `triz ${TRIZ_VERSION} skills install --target ${target} (${scope.kind}): ${report.summary()}${opts.dryRun ? ' (dry run: nothing written)' : ''}`,
     );
-  }
-  return out;
+    if (report.count('modified, skipped') + report.count('foreign, skipped') > 0) {
+      out.push('Skipped files were kept as they are; rerun with --force to overwrite them.');
+    }
+    if (target === 'all') {
+      out.push(
+        'Note: --target all writes .claude/skills (Claude Code) and .agents/skills (Codex, Gemini and others) only. ' +
+          'Cursor and Copilot read both directories and may list each skill twice; to avoid that, install with --target cursor or --target copilot alone.',
+      );
+    }
+    return out;
+  });
 }
 
 function skillsUninstall(opts: SkillsOptions): string[] {
@@ -1960,29 +2069,22 @@ function skillsUninstall(opts: SkillsOptions): string[] {
     }
   };
   const roots = rootsFor(target, scope).filter((r) => isDir(r.dir));
-  const plans = roots.map((root) => planUninstallRoot(root, target, names)).filter((p): p is RootPlan => p !== null);
-  const agentsSkills = agentsRoot(scope.base);
-  let agents: AgentsPlan | null = null;
-  if (target === 'agents-md') {
-    const manifest = plans.find((p) => p.root.dir === agentsSkills.dir)?.manifest;
-    agents = planUninstallAgentsMd(scope.base, manifest?.agents_md_block, manifest?.agents_md_created === true);
-  }
-  const report = new SkillsReport();
-  for (const plan of plans) executeRootPlan(plan, opts.dryRun, report);
-  if (agents) executeAgentsPlan(agents, agentsSkills, names, opts.dryRun, report);
-  if (!opts.dryRun) {
-    for (const root of roots) {
-      try {
-        rmdirSync(root.dir);
-      } catch {
-        // Not empty: it still holds someone's files.
-      }
+  return withRootLocks(opts.dryRun ? [] : roots, () => {
+    const plans = roots.map((root) => planUninstallRoot(root, target, names)).filter((p): p is RootPlan => p !== null);
+    const agentsSkills = agentsRoot(scope.base);
+    let agents: AgentsPlan | null = null;
+    if (target === 'agents-md') {
+      const manifest = plans.find((p) => p.root.dir === agentsSkills.dir)?.manifest;
+      agents = planUninstallAgentsMd(scope.base, manifest?.agents_md_block, manifest?.agents_md_created === true);
     }
-  }
-  return [
-    ...report.lines,
-    `triz ${TRIZ_VERSION} skills uninstall --target ${target} (${scope.kind}): ${report.summary()}${opts.dryRun ? ' (dry run: nothing removed)' : ''}`,
-  ];
+    const report = new SkillsReport();
+    for (const plan of plans) executeRootPlan(plan, opts.dryRun, report);
+    if (agents) executeAgentsPlan(agents, agentsSkills, names, opts.dryRun, report);
+    return [
+      ...report.lines,
+      `triz ${TRIZ_VERSION} skills uninstall --target ${target} (${scope.kind}): ${report.summary()}${opts.dryRun ? ' (dry run: nothing removed)' : ''}`,
+    ];
+  });
 }
 
 function skillsList(opts: SkillsOptions): string[] {

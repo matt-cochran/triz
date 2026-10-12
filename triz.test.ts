@@ -2,9 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, rmSync, existsSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { dirname, join, relative, sep } from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -790,10 +790,10 @@ function frontMatter(text: string, key: string): string {
 
 /** Run `triz skills ...` with HOME pointed at a temporary directory, so no
  * test can read or write the real home directory. */
-function runSkills(args: string[], home: string) {
+function runSkills(args: string[], home: string, env: NodeJS.ProcessEnv = {}) {
   return spawnSync(process.execPath, [trizPath, 'skills', ...args], {
     encoding: 'utf8',
-    env: { ...process.env, HOME: home, USERPROFILE: home },
+    env: { ...process.env, HOME: home, USERPROFILE: home, ...env },
   });
 }
 
@@ -1063,5 +1063,75 @@ test('skills install refuses a manifest that lists a path outside its root', () 
 test('skills --help exits zero', () => {
   const { home, root } = skillsSandbox();
   assert.equal(runSkills(['--help'], home).status, 0);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills install exits non-zero while another live run holds the lock', () => {
+  const { project, home, root } = skillsSandbox();
+  const skills = join(project, '.claude', 'skills');
+  mkdirSync(skills, { recursive: true });
+  writeFileSync(
+    join(skills, '.triz-skills.lock'),
+    JSON.stringify({ pid: process.pid, host: hostname(), created: new Date().toISOString() }),
+  );
+  const result = runSkills(['install', '--target', 'claude', '--project', project], home, { TRIZ_SKILLS_LOCK_WAIT_MS: '200' });
+  assert.notEqual(result.status, 0);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills install writes no skill files while another live run holds the lock', () => {
+  const { project, home, root } = skillsSandbox();
+  const skills = join(project, '.claude', 'skills');
+  mkdirSync(skills, { recursive: true });
+  writeFileSync(
+    join(skills, '.triz-skills.lock'),
+    JSON.stringify({ pid: process.pid, host: hostname(), created: new Date().toISOString() }),
+  );
+  runSkills(['install', '--target', 'claude', '--project', project], home, { TRIZ_SKILLS_LOCK_WAIT_MS: '200' });
+  assert.equal(existsSync(join(skills, 'triz', 'SKILL.md')), false);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills install waits on a just-created lock that has no owner written yet', () => {
+  const { project, home, root } = skillsSandbox();
+  const skills = join(project, '.claude', 'skills');
+  mkdirSync(skills, { recursive: true });
+  writeFileSync(join(skills, '.triz-skills.lock'), '');
+  const result = runSkills(['install', '--target', 'claude', '--project', project], home, { TRIZ_SKILLS_LOCK_WAIT_MS: '200' });
+  assert.notEqual(result.status, 0);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills install recovers a lock left by a process that has exited', () => {
+  const { project, home, root } = skillsSandbox();
+  const dead = spawnSync(process.execPath, ['-e', ''], { encoding: 'utf8' });
+  const skills = join(project, '.claude', 'skills');
+  mkdirSync(skills, { recursive: true });
+  writeFileSync(
+    join(skills, '.triz-skills.lock'),
+    JSON.stringify({ pid: dead.pid, host: hostname(), created: new Date().toISOString() }),
+  );
+  assert.equal(runSkills(['install', '--target', 'claude', '--project', project], home).status, 0);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills install removes its lock file when it finishes', () => {
+  const { project, home, root } = skillsSandbox();
+  runSkills(['install', '--target', 'claude', '--project', project], home);
+  assert.equal(existsSync(join(project, '.claude', 'skills', '.triz-skills.lock')), false);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('two concurrent skills installs into the same project both exit zero', async () => {
+  const { project, home, root } = skillsSandbox();
+  const install = () =>
+    new Promise<number | null>((resolve) => {
+      const child = spawn(process.execPath, [trizPath, 'skills', 'install', '--target', 'claude', '--project', project], {
+        env: { ...process.env, HOME: home, USERPROFILE: home },
+      });
+      child.on('close', (code) => resolve(code));
+    });
+  const codes = await Promise.all([install(), install()]);
+  assert.deepEqual(codes, [0, 0]);
   rmSync(root, { recursive: true, force: true });
 });
