@@ -17,6 +17,10 @@ name: Release
 # release asset instead, so the GitHub release always carries the bytes npm
 # serves. Re-running a tag is therefore safe.
 #
+# A tag push runs the workflow file at the tagged commit. To backfill a release
+# for an older commit, dispatch this workflow from main with the tag as input,
+# so the current release jobs run against the older source.
+#
 # This file must stay named publish.yml: npm Trusted Publishing for
 # @matthew-cochran/triz is bound to it (GitHub Actions, owner matt-cochran,
 # repository triz, workflow publish.yml, environment blank). No NPM_TOKEN
@@ -159,6 +163,8 @@ jobs:
           name: release-assets
           path: .artifacts/
           if-no-files-found: error
+          # .artifacts/ is a dot-directory, which upload-artifact skips by default.
+          include-hidden-files: true
 
   npm:
     name: Publish to npm
