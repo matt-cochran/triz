@@ -80,8 +80,10 @@ triz catalog
 ```
 
 `npm install <tarball>` also works in a project or a temporary prefix. The
-manifest records the version, tag, commit SHA, asset digest, the Node engine,
-and the architecture-independent targets.
+manifest records the version, tag, full commit SHA, asset digest, the Node
+engine, and the architecture-independent targets. `checksums.sha256` covers
+both the tarball and the manifest. A release made by the publish workflow carries
+the same tarball that npm serves for that version.
 
 ## Run
 
@@ -101,10 +103,19 @@ triz catalog
 # Show help (global or per command):
 triz --help
 triz analyze --help
+
+# Print the installed version (`triz <version>`):
+triz --version
+
+# Install the agent skills for Claude Code in this repository:
+triz skills install --target claude --project .
 ```
 
 Options: `--offline <response.json>`, `--out <result.json>`,
 `--provider <provider>`, `--model <model>`, `--timeout-ms <n>`.
+
+`triz --version` (or `-V`) prints exactly one line, `triz <version>`, read from
+the package's own `package.json`, and exits `0`.
 
 Every command also accepts `-h`/`--help`, which prints usage to stdout and
 exits `0` without reading input files, writing output, or contacting a
@@ -116,6 +127,45 @@ non-zero exit code.
 The same CLI can be run directly from the compiled file with `node
 dist/triz.js <command>`. npm bin shims and symlinks are recognized on all
 platforms, including Windows `.cmd`/`.ps1` shims.
+
+## Agent skills
+
+The package ships two [Agent Skills](https://agentskills.io) under `skills/`:
+
+- `triz`: the method reference. When TRIZ applies, the offline and paid
+  commands, and the request and result formats.
+- `triz-contradiction`: the step-by-step workflow, from naming the improving
+  and worsening parameters to attaching the saved result to the decision record.
+
+Install them for your agent tool with:
+
+```sh
+triz skills install --target <claude|codex|cursor|copilot|gemini|agents-md|all> (--project <dir> | --user) [--dry-run] [--force]
+triz skills uninstall --target <target> (--project <dir> | --user) [--dry-run]
+triz skills list [--project <dir> | --user]
+```
+
+| Target | Project scope | User scope |
+| --- | --- | --- |
+| `claude` | `.claude/skills/` | `~/.claude/skills/` |
+| `codex` | `.agents/skills/` | `~/.agents/skills/` |
+| `cursor` | `.cursor/skills/` | `~/.cursor/skills/` |
+| `copilot` | `.github/skills/` | `~/.copilot/skills/` |
+| `gemini` | `.agents/skills/` + `.gemini/commands/triz-*.toml` | same under `~` |
+| `agents-md` | a `<!-- triz:begin -->` … `<!-- triz:end -->` block in `AGENTS.md` + `.agents/skills/` | not available |
+| `all` | `.claude/skills/` + `.agents/skills/` | same under `~` |
+
+Each skills directory gets a `.triz-skills.json` manifest
+(`{ "schema": 1, "triz_version", "targets", "files": { "<path>": "<sha256>" } }`).
+A reinstall replaces only files whose current hash still matches the manifest.
+Files you edited, and files triz did not write, are reported as skipped and
+left alone unless you pass `--force`. Uninstall removes only files the manifest
+owns and still match, and keeps a directory shared by another target (for
+example `.agents/skills/` used by both `codex` and `gemini`) until the last
+target is uninstalled. Every change is planned before the first write, and each
+file is written atomically. `--dry-run` reports the plan and writes nothing.
+The installer never writes MCP configuration. `list` reports installs under
+the user home and the current directory, or only under the scope you give.
 
 ## Request format
 
@@ -221,7 +271,7 @@ The compiled package exports the pure pieces so another tool can integrate
 without the CLI: `validateRequest`, `interpretVerdict`, `buildQuestions`,
 `adaptClassifierResponse`, `buildResult`, `hashInput`, `inspectResult`,
 `writeResultAtomic`, `validateCatalog`, `CATALOG`, `CATALOG_VERSION`,
-`PRINCIPLE_IDS`, `PHYSICAL_ROUTE_IDS`, `SCHEMA_VERSION`, `analyze`, and
+`PRINCIPLE_IDS`, `PHYSICAL_ROUTE_IDS`, `SCHEMA_VERSION`, `TRIZ_VERSION`, `analyze`, and
 `createTrizClassifier`. Use `analyze(request,
 { classify })` with an injected classifier for offline or custom transports.
 
@@ -258,8 +308,11 @@ The suite makes no paid model calls and needs no network. It covers each
 taxonomy outcome, malformed and low-confidence responses, wrong evidence IDs,
 catalog validation, usage availability with missing, zero, cached, and finite
 Pi costs, atomic persistence, a CLI analyze-then-inspect restart check, and
-atomic packaged-CLI behavior: the compiled entrypoint, tarball
-contents, package metadata, the release manifest/checksums, and installation
+the skills installer (manifest, idempotent re-runs, edit protection, `--force`,
+uninstall ownership, `--dry-run`, every target, and the `AGENTS.md` block, all
+in temporary project and home directories), and atomic packaged-CLI behavior:
+the compiled entrypoint, `--version`, tarball contents including each
+`SKILL.md`, package metadata, the release manifest/checksums, and installation
 into a temporary prefix.
 
 CI runs on Node 24 and 26 across the supported OS/architecture matrix. Live
@@ -267,14 +320,13 @@ output is kept in ignored local artifacts. Billed cost remains unknown.
 
 ## Open-source project
 
-MIT licensed. See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [SUPPORT.md](SUPPORT.md). Live analysis sends supplied evidence to the configured provider; offline classification fixtures require no provider access. Results are reviewable candidate strategies, not automatic implementation decisions. GitHub release tarballs do not imply npm registry availability.
+MIT licensed. See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [SUPPORT.md](SUPPORT.md). Live analysis sends supplied evidence to the configured provider; offline classification fixtures require no provider access. Results are reviewable candidate strategies, not automatic implementation decisions.
 
 ## Publishing
 
-Maintainers publish the first version with `npm login` followed by
-`npm publish --access public`. Configure npm Trusted Publishing for this
-package using GitHub owner `matt-cochran`, repository `triz`, and workflow
-`publish.yml` (environment blank). Subsequent matching `vX.Y.Z` tags publish
-through GitHub Actions with provenance after the package tests pass. No
-long-lived npm token is needed in GitHub. The separate GitHub release workflow
-continues producing reviewed tarballs and checksums.
+A single `vX.Y.Z` tag publishes to npm (with provenance, through npm Trusted
+Publishing bound to the `publish.yml` workflow; no long-lived npm token is
+stored in GitHub) and creates the matching GitHub release with the tarball,
+checksums, and manifest. The workflow fails when the tag and the package.json
+version disagree. The step-by-step procedure, including backfilling a release
+for a version already on npm, is in [CONTRIBUTING.md](CONTRIBUTING.md#releases).

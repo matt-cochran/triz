@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readdirSync, rmSync, existsSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
@@ -751,4 +752,316 @@ test('analyze accepts a numeric timeout option', () => {
   runTriz(['analyze', requestPath, '--offline', fixturePath, '--out', outPath, '--timeout-ms', '1000']);
   assert.equal(JSON.parse(readFileSync(outPath, 'utf8')).classification, 'technical');
   rmSync(dir, { recursive: true, force: true });
+});
+
+// --- CLI version ------------------------------------------------------------
+
+const packageVersion = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version;
+
+test('--version exits zero', () => {
+  assert.equal(runTriz(['--version']).status, 0);
+});
+
+test('--version prints only the triz package version line', () => {
+  assert.equal(runTriz(['--version']).stdout, `triz ${packageVersion}\n`);
+});
+
+test('-V prints only the triz package version line', () => {
+  assert.equal(runTriz(['-V']).stdout, `triz ${packageVersion}\n`);
+});
+
+test('top-level --help lists the version flag', () => {
+  assert.match(runTriz(['--help']).stdout, /-V, --version/);
+});
+
+// --- Agent skills -------------------------------------------------------------
+
+const skillsDir = fileURLToPath(new URL('./skills/', import.meta.url));
+const shippedSkillNames = readdirSync(skillsDir).filter((n) => existsSync(join(skillsDir, n, 'SKILL.md'))).sort();
+
+function shippedSkill(name: string): string {
+  return readFileSync(join(skillsDir, name, 'SKILL.md'), 'utf8');
+}
+
+function frontMatter(text: string, key: string): string {
+  const raw = new RegExp(`^${key}:\\s*(.*)$`, 'm').exec(/^---\n([\s\S]*?)\n---/.exec(text)?.[1] ?? '')?.[1] ?? '';
+  return raw.startsWith('"') ? JSON.parse(raw) : raw;
+}
+
+/** Run `triz skills ...` with HOME pointed at a temporary directory, so no
+ * test can read or write the real home directory. */
+function runSkills(args: string[], home: string) {
+  return spawnSync(process.execPath, [trizPath, 'skills', ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, HOME: home, USERPROFILE: home },
+  });
+}
+
+/** A temporary project and home directory pair. */
+function skillsSandbox(): { project: string; home: string; root: string } {
+  const root = tempDir();
+  const project = join(root, 'project');
+  const home = join(root, 'home');
+  for (const dir of [project, home]) mkdirSync(dir);
+  return { project, home, root };
+}
+
+/** Every file under `dir` as `/`-separated relative path -> contents. */
+function tree(dir: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const entry of readdirSync(dir, { recursive: true, withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const full = join(entry.parentPath, entry.name);
+    out[relative(dir, full).split(sep).join('/')] = readFileSync(full, 'utf8');
+  }
+  return out;
+}
+
+test('shipped skills declare a front-matter name matching their folder', () => {
+  assert.deepEqual(shippedSkillNames.map((n) => frontMatter(shippedSkill(n), 'name')), shippedSkillNames);
+});
+
+test('shipped skills declare descriptions under 1024 characters', () => {
+  const tooLong = shippedSkillNames.filter((n) => {
+    const d = frontMatter(shippedSkill(n), 'description');
+    return d.length === 0 || d.length >= 1024;
+  });
+  assert.deepEqual(tooLong, []);
+});
+
+test('shipped skills include the triz method and the triz-contradiction workflow', () => {
+  assert.deepEqual(['triz', 'triz-contradiction'].filter((n) => !shippedSkillNames.includes(n)), []);
+});
+
+test('skills install copies every shipped skill into the claude project skills root', () => {
+  const { project, home, root } = skillsSandbox();
+  runSkills(['install', '--target', 'claude', '--project', project], home);
+  const installed = shippedSkillNames.map((n) => readFileSync(join(project, '.claude', 'skills', n, 'SKILL.md'), 'utf8'));
+  assert.deepEqual(installed, shippedSkillNames.map(shippedSkill));
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills install writes a manifest with the schema, version, target, and file hashes', () => {
+  const { project, home, root } = skillsSandbox();
+  runSkills(['install', '--target', 'claude', '--project', project], home);
+  const manifest = JSON.parse(readFileSync(join(project, '.claude', 'skills', '.triz-skills.json'), 'utf8'));
+  const files = Object.fromEntries(
+    shippedSkillNames.map((n) => [`${n}/SKILL.md`, createHash('sha256').update(shippedSkill(n)).digest('hex')]),
+  );
+  assert.deepEqual(manifest, { schema: 1, triz_version: packageVersion, targets: ['claude'], files });
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills install re-run leaves the installed tree unchanged', () => {
+  const { project, home, root } = skillsSandbox();
+  runSkills(['install', '--target', 'all', '--project', project], home);
+  const first = tree(project);
+  runSkills(['install', '--target', 'all', '--project', project], home);
+  assert.deepEqual(tree(project), first);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills install re-run reports every file as unchanged', () => {
+  const { project, home, root } = skillsSandbox();
+  runSkills(['install', '--target', 'claude', '--project', project], home);
+  const rerun = runSkills(['install', '--target', 'claude', '--project', project], home);
+  assert.match(rerun.stdout, new RegExp(`: 0 created, 0 updated, ${shippedSkillNames.length} unchanged,`));
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills install keeps a user-edited skill without --force', () => {
+  const { project, home, root } = skillsSandbox();
+  const skill = join(project, '.claude', 'skills', 'triz', 'SKILL.md');
+  runSkills(['install', '--target', 'claude', '--project', project], home);
+  writeFileSync(skill, 'my notes\n');
+  runSkills(['install', '--target', 'claude', '--project', project], home);
+  assert.equal(readFileSync(skill, 'utf8'), 'my notes\n');
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills install reports a user-edited skill as skipped', () => {
+  const { project, home, root } = skillsSandbox();
+  const skill = join(project, '.claude', 'skills', 'triz', 'SKILL.md');
+  runSkills(['install', '--target', 'claude', '--project', project], home);
+  writeFileSync(skill, 'my notes\n');
+  assert.match(runSkills(['install', '--target', 'claude', '--project', project], home).stdout, /^modified, skipped {2}.*SKILL\.md$/m);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills install --force replaces a user-edited skill', () => {
+  const { project, home, root } = skillsSandbox();
+  const skill = join(project, '.claude', 'skills', 'triz', 'SKILL.md');
+  runSkills(['install', '--target', 'claude', '--project', project], home);
+  writeFileSync(skill, 'my notes\n');
+  runSkills(['install', '--target', 'claude', '--project', project, '--force'], home);
+  assert.equal(readFileSync(skill, 'utf8'), shippedSkill('triz'));
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills install keeps a foreign file it did not write', () => {
+  const { project, home, root } = skillsSandbox();
+  const skill = join(project, '.claude', 'skills', 'triz', 'SKILL.md');
+  mkdirSync(dirname(skill), { recursive: true });
+  writeFileSync(skill, 'someone else\n');
+  runSkills(['install', '--target', 'claude', '--project', project], home);
+  assert.equal(readFileSync(skill, 'utf8'), 'someone else\n');
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills uninstall removes only the files its manifest owns', () => {
+  const { project, home, root } = skillsSandbox();
+  runSkills(['install', '--target', 'claude', '--project', project], home);
+  mkdirSync(join(project, '.claude', 'skills', 'other'));
+  writeFileSync(join(project, '.claude', 'skills', 'other', 'SKILL.md'), 'not ours\n');
+  runSkills(['uninstall', '--target', 'claude', '--project', project], home);
+  assert.deepEqual(tree(project), { '.claude/skills/other/SKILL.md': 'not ours\n' });
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills uninstall keeps a user-edited skill', () => {
+  const { project, home, root } = skillsSandbox();
+  const skill = join(project, '.claude', 'skills', 'triz', 'SKILL.md');
+  runSkills(['install', '--target', 'claude', '--project', project], home);
+  writeFileSync(skill, 'my notes\n');
+  runSkills(['uninstall', '--target', 'claude', '--project', project], home);
+  assert.equal(readFileSync(skill, 'utf8'), 'my notes\n');
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills uninstall of one target keeps a root another target still uses', () => {
+  const { project, home, root } = skillsSandbox();
+  runSkills(['install', '--target', 'codex', '--project', project], home);
+  runSkills(['install', '--target', 'all', '--project', project], home);
+  runSkills(['uninstall', '--target', 'all', '--project', project], home);
+  assert.equal(existsSync(join(project, '.agents', 'skills', 'triz', 'SKILL.md')), true);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills install --dry-run writes nothing', () => {
+  const { project, home, root } = skillsSandbox();
+  runSkills(['install', '--target', 'agents-md', '--project', project, '--dry-run'], home);
+  assert.deepEqual(readdirSync(project), []);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills uninstall --dry-run removes nothing', () => {
+  const { project, home, root } = skillsSandbox();
+  runSkills(['install', '--target', 'claude', '--project', project], home);
+  const before = tree(project);
+  runSkills(['uninstall', '--target', 'claude', '--project', project, '--dry-run'], home);
+  assert.deepEqual(tree(project), before);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills install rejects an unknown target', () => {
+  const { project, home, root } = skillsSandbox();
+  assert.notEqual(runSkills(['install', '--target', 'emacs', '--project', project], home).status, 0);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills install with an unknown target writes nothing', () => {
+  const { project, home, root } = skillsSandbox();
+  runSkills(['install', '--target', 'emacs', '--project', project], home);
+  assert.deepEqual(readdirSync(project), []);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills install requires a project or user scope', () => {
+  const { home, root } = skillsSandbox();
+  assert.notEqual(runSkills(['install', '--target', 'claude'], home).status, 0);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills install rejects the agents-md target at user scope', () => {
+  const { home, root } = skillsSandbox();
+  assert.notEqual(runSkills(['install', '--target', 'agents-md', '--user'], home).status, 0);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills install --user writes under the home directory', () => {
+  const { home, root } = skillsSandbox();
+  runSkills(['install', '--target', 'copilot', '--user'], home);
+  assert.equal(existsSync(join(home, '.copilot', 'skills', 'triz', 'SKILL.md')), true);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills install for copilot at project scope writes under .github/skills', () => {
+  const { project, home, root } = skillsSandbox();
+  runSkills(['install', '--target', 'copilot', '--project', project], home);
+  assert.equal(existsSync(join(project, '.github', 'skills', 'triz', 'SKILL.md')), true);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills install for cursor writes under .cursor/skills', () => {
+  const { project, home, root } = skillsSandbox();
+  runSkills(['install', '--target', 'cursor', '--project', project], home);
+  assert.equal(existsSync(join(project, '.cursor', 'skills', 'triz', 'SKILL.md')), true);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills install for gemini writes a triz-* command for each workflow skill', () => {
+  const { project, home, root } = skillsSandbox();
+  runSkills(['install', '--target', 'gemini', '--project', project], home);
+  const commands = readdirSync(join(project, '.gemini', 'commands')).filter((f) => f.endsWith('.toml'));
+  assert.deepEqual(commands, shippedSkillNames.filter((n) => n.startsWith('triz-')).map((n) => `${n}.toml`));
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills install for all writes only skill files and manifests', () => {
+  const { project, home, root } = skillsSandbox();
+  runSkills(['install', '--target', 'all', '--project', project], home);
+  const unexpected = Object.keys(tree(project)).filter(
+    (p) => !/^\.(claude|agents)\/skills\/(\.triz-skills\.json|[^/]+\/SKILL\.md)$/.test(p),
+  );
+  assert.deepEqual(unexpected, []);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills install for agents-md adds a marked block to an existing AGENTS.md', () => {
+  const { project, home, root } = skillsSandbox();
+  writeFileSync(join(project, 'AGENTS.md'), '# Project notes\n');
+  runSkills(['install', '--target', 'agents-md', '--project', project], home);
+  assert.match(readFileSync(join(project, 'AGENTS.md'), 'utf8'), /^# Project notes\n\n<!-- triz:begin -->\n[\s\S]*\n<!-- triz:end -->\n$/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills uninstall for agents-md restores the original AGENTS.md', () => {
+  const { project, home, root } = skillsSandbox();
+  writeFileSync(join(project, 'AGENTS.md'), '# Project notes\r\n\r\nKeep this.\r\n');
+  runSkills(['install', '--target', 'agents-md', '--project', project], home);
+  runSkills(['uninstall', '--target', 'agents-md', '--project', project], home);
+  assert.equal(readFileSync(join(project, 'AGENTS.md'), 'utf8'), '# Project notes\r\n\r\nKeep this.\r\n');
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills list reports an install found under the project root', () => {
+  const { project, home, root } = skillsSandbox();
+  runSkills(['install', '--target', 'claude', '--project', project], home);
+  const listed = runSkills(['list', '--project', project], home);
+  assert.match(listed.stdout, new RegExp(`\\.claude[\\\\/]skills {2}\\(project\\) triz ${packageVersion.replace(/\./g, '\\.')} \\[claude\\]`));
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills list reports an install found under the user root', () => {
+  const { home, root } = skillsSandbox();
+  runSkills(['install', '--target', 'codex', '--user'], home);
+  assert.match(runSkills(['list', '--user'], home).stdout, /\.agents[\\/]skills {2}\(user\)/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills install refuses a manifest that lists a path outside its root', () => {
+  const { project, home, root } = skillsSandbox();
+  mkdirSync(join(project, '.claude', 'skills'), { recursive: true });
+  writeFileSync(
+    join(project, '.claude', 'skills', '.triz-skills.json'),
+    JSON.stringify({ schema: 1, triz_version: '0.0.0', targets: ['claude'], files: { '../../escape.txt': 'x' } }),
+  );
+  assert.notEqual(runSkills(['install', '--target', 'claude', '--project', project], home).status, 0);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('skills --help exits zero', () => {
+  const { home, root } = skillsSandbox();
+  assert.equal(runSkills(['--help'], home).status, 0);
+  rmSync(root, { recursive: true, force: true });
 });

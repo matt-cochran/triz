@@ -18,4 +18,18 @@ Describe the problem, final behavior, evidence, and tests. Update documentation 
 
 ## Releases
 
-Bump package.json and package-lock.json together and push a matching version tag only when authorized to release. The workflow gates on platform tests and creates a draft with checksum and provenance manifest assets. A maintainer reviews the draft before publication. GitHub tarball releases do not imply npm registry publication or ownership of the unscoped triz name.
+One version tag produces both the npm publication and the GitHub release, through a single workflow, `.github/workflows/publish.yml` (keep that file name: npm Trusted Publishing is bound to it). Release only when authorized to.
+
+1. On a branch, bump the version in package.json and package-lock.json together (`npm version X.Y.Z --no-git-tag-version`), run `npm test` and `npm pack --dry-run`, and merge the pull request.
+2. Tag the merged commit on main and push only the tag: `git tag vX.Y.Z <commit>` then `git push origin vX.Y.Z`. The tag must be exactly `v` plus the package.json version.
+3. The workflow then:
+   - fails unless the tag matches the package.json version (`scripts/verify-tag-version.mjs`);
+   - runs `npm test` on the six platform runners;
+   - packs one tarball and writes `triz-vX.Y.Z-node.tgz`, `checksums.sha256` (sha256sum lines for the tarball and the manifest) and `release-manifest.json` (`version`, `tag`, and the full 40-character source `commit`), and fails unless `scripts/verify-release-assets.mjs` accepts exactly those three assets;
+   - publishes that tarball to npm with provenance, unless the version is already on npm;
+   - creates (or updates and un-drafts) the GitHub release for the tag with the three assets, then downloads them again and checks the checksums.
+4. Check that `npm view @matthew-cochran/triz version` and the release page show the new version.
+
+Re-running the workflow for a tag is safe: a version already on npm is not republished, and its registry tarball becomes the release asset so the GitHub release carries the bytes npm serves. To backfill a GitHub release for a version that is already on npm, tag the commit npm recorded (`npm view @matthew-cochran/triz@X.Y.Z gitHead`), push the tag, or run the workflow from main with the tag as input (Actions, Release, Run workflow). The workflow refuses a tag that does not point at that commit.
+
+Junior's checksum-verifying installer depends on exactly these asset names and manifest fields; change them only together with it.

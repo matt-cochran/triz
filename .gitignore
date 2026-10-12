@@ -1,5 +1,6 @@
 .delivery/
 .artifacts/
+.pack/
 node_modules/
 dist/
 *.tgz

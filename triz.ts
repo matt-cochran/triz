@@ -10,8 +10,24 @@
 // heuristic is not a canonical matrix lookup.
 
 import { createHash } from 'node:crypto';
-import { mkdirSync, writeFileSync, renameSync, readFileSync, realpathSync } from 'node:fs';
-import { dirname, resolve, join, basename } from 'node:path';
+import {
+  closeSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+  writeSync,
+} from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, resolve, join, basename, relative, isAbsolute, sep } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 
 // ---------------------------------------------------------------------------
@@ -1107,6 +1123,30 @@ export async function analyze(requestInput: unknown, options: AnalyzeOptions = {
 }
 
 // ---------------------------------------------------------------------------
+// Package location and version
+// ---------------------------------------------------------------------------
+
+const PACKAGE_NAME = '@matthew-cochran/triz';
+
+/** The directory holding this package's package.json: the module's own
+ * directory when run from source (`triz.ts`), or its parent when run from the
+ * compiled `dist/triz.js`, whether in a checkout or an installed package. */
+function packageRoot(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  for (const dir of [here, dirname(here)]) {
+    try {
+      if (JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')).name === PACKAGE_NAME) return dir;
+    } catch {
+      // Not this directory; try the next candidate.
+    }
+  }
+  throw Error(`cannot find the ${PACKAGE_NAME} package.json next to ${here}`);
+}
+
+const PACKAGE_ROOT = packageRoot();
+export const TRIZ_VERSION: string = JSON.parse(readFileSync(join(PACKAGE_ROOT, 'package.json'), 'utf8')).version;
+
+// ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 
@@ -1158,9 +1198,11 @@ const MAIN_USAGE = [
   '  analyze <request.json>  Classify a TRIZ request',
   '  inspect <result.json>   Print a persisted result',
   '  catalog                 Print the curated catalog',
+  '  skills <action>         Install, uninstall or list agent skills',
   '',
   'Options:',
   '  -h, --help              Show help',
+  '  -V, --version           Print the triz version',
   '',
   'Run "triz <command> --help" for command-specific options.',
 ].join('\n');
@@ -1280,6 +1322,745 @@ function cliCatalog(spec: CliCommandSpec, args: string[]): number {
   return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Agent skills installer (`triz skills install|uninstall|list`)
+// ---------------------------------------------------------------------------
+//
+// Copies the agent skills shipped under `skills/` into the directories each
+// agent tool reads. Every skills root written to gets a manifest,
+// SKILLS_MANIFEST_FILE, recording the sha256 of each file as written and the
+// targets that installed into the root. A later run uses it to tell triz's
+// files from the user's: a file not in the manifest is foreign, a file whose
+// hash no longer matches was edited by the user, and only a file that still
+// matches is replaced or removed. `--force` overwrites foreign and edited
+// files. A root shared by several targets (`.agents/skills`) keeps its files
+// until the last of them is uninstalled. Each run plans and validates every
+// change before the first write, writes atomically, and never writes MCP
+// configuration.
+
+export const SKILLS_MANIFEST_FILE = '.triz-skills.json';
+export const SKILLS_MANIFEST_SCHEMA = 1;
+export const SKILL_TARGETS = ['claude', 'codex', 'cursor', 'copilot', 'gemini', 'agents-md', 'all'] as const;
+export type SkillTarget = (typeof SKILL_TARGETS)[number];
+
+const AGENTS_BLOCK_BEGIN = '<!-- triz:begin -->';
+const AGENTS_BLOCK_END = '<!-- triz:end -->';
+
+const SKILLS_USAGE = [
+  'Usage:',
+  '  triz skills install   --target <target> (--project <dir> | --user) [--dry-run] [--force]',
+  '  triz skills uninstall --target <target> (--project <dir> | --user) [--dry-run]',
+  '  triz skills list      [--project <dir> | --user]',
+  '',
+  'Targets:',
+  '  claude     Claude Code      .claude/skills/          (user: ~/.claude/skills/)',
+  '  codex      OpenAI Codex     .agents/skills/          (user: ~/.agents/skills/)',
+  '  cursor     Cursor           .cursor/skills/          (user: ~/.cursor/skills/)',
+  '  copilot    GitHub Copilot   .github/skills/          (user: ~/.copilot/skills/)',
+  '  gemini     Gemini CLI       .agents/skills/ + .gemini/commands/triz-*.toml',
+  '  agents-md  AGENTS.md block + .agents/skills/         (project only; for user scope use codex)',
+  '  all        .claude/skills/ + .agents/skills/',
+  '',
+  'A file you edited, or one triz did not write, is kept and reported as skipped;',
+  '--force overwrites it. No MCP configuration is written.',
+].join('\n');
+
+type SkillsManifest = {
+  schema: number;
+  triz_version: string;
+  targets: string[];
+  files: Record<string, string>;
+  agents_md_block?: string;
+  agents_md_created?: boolean;
+};
+
+type SkillStatus = 'created' | 'updated' | 'unchanged' | 'modified, skipped' | 'foreign, skipped' | 'removed';
+const SKILL_STATUSES: SkillStatus[] = ['created', 'updated', 'unchanged', 'modified, skipped', 'foreign, skipped', 'removed'];
+
+type SkillScope = { kind: 'user' | 'project'; base: string };
+type SkillRoot = { dir: string; kind: 'skills' | 'gemini' };
+
+class SkillsUsageError extends Error {}
+
+function sha256Hex(data: string | Buffer): string {
+  return createHash('sha256').update(data).digest('hex');
+}
+
+/** Every file under the shipped `skills/` directory as (`/`-separated path, contents). */
+function shippedSkillFiles(): [string, string][] {
+  const base = join(PACKAGE_ROOT, 'skills');
+  const files: [string, string][] = [];
+  const walk = (dir: string, rel: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) walk(join(dir, entry.name), childRel);
+      else if (entry.isFile()) files.push([childRel, readFileSync(join(dir, entry.name), 'utf8')]);
+    }
+  };
+  walk(base, '');
+  return files;
+}
+
+/** The shipped skills (directories holding a SKILL.md) and their front-matter descriptions. */
+function shippedSkills(files: [string, string][]): { name: string; description: string }[] {
+  return files
+    .filter(([rel]) => /^[^/]+\/SKILL\.md$/.test(rel))
+    .map(([rel, text]) => {
+      const name = rel.split('/')[0];
+      const front = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1] ?? '';
+      const raw = /^description:\s*(.*)$/m.exec(front)?.[1]?.trim() ?? '';
+      const description = raw.startsWith('"') ? JSON.parse(raw) : raw;
+      return { name, description };
+    });
+}
+
+function skillsHome(): string {
+  return process.env.HOME || process.env.USERPROFILE || homedir();
+}
+
+function agentsRoot(base: string): SkillRoot {
+  return { dir: join(base, '.agents', 'skills'), kind: 'skills' };
+}
+
+function rootsFor(target: SkillTarget, scope: SkillScope): SkillRoot[] {
+  const skills = (rel: string): SkillRoot => ({ dir: join(scope.base, rel, 'skills'), kind: 'skills' });
+  switch (target) {
+    case 'claude':
+      return [skills('.claude')];
+    case 'codex':
+    case 'agents-md':
+      return [agentsRoot(scope.base)];
+    case 'cursor':
+      return [skills('.cursor')];
+    case 'copilot':
+      return [skills(scope.kind === 'user' ? '.copilot' : '.github')];
+    case 'gemini':
+      return [agentsRoot(scope.base), { dir: join(scope.base, '.gemini', 'commands'), kind: 'gemini' }];
+    case 'all':
+      return [skills('.claude'), agentsRoot(scope.base)];
+  }
+}
+
+/** Every root any target can write for `scope`, for `list`. */
+function allSkillRoots(scope: SkillScope): SkillRoot[] {
+  const roots: SkillRoot[] = [];
+  for (const target of ['claude', 'codex', 'cursor', 'copilot', 'gemini'] as const) {
+    for (const root of rootsFor(target, scope)) if (!roots.some((r) => r.dir === root.dir)) roots.push(root);
+  }
+  return roots;
+}
+
+function tomlString(text: string): string {
+  return JSON.stringify(text);
+}
+
+/** A Gemini CLI command that points Gemini at the installed skill, so the
+ * skill stays the single source of instructions. */
+function geminiCommand(name: string, description: string, scope: SkillScope): string {
+  const skillPath =
+    scope.kind === 'project' ? `.agents/skills/${name}/SKILL.md` : join(scope.base, '.agents', 'skills', name, 'SKILL.md');
+  const prompt =
+    `Follow the \`${name}\` agent skill for this request. Activate it with the activate_skill tool if it is ` +
+    `available; otherwise read the file ${skillPath} and follow its instructions exactly, resolving its relative ` +
+    `links from that file's directory. It uses the triz CLI.\n\nRequest: {{args}}\n`;
+  return [
+    '# Generated by triz skills install --target gemini. An edited copy is kept and no longer updated.',
+    `description = ${tomlString(description)}`,
+    `prompt = ${tomlString(prompt)}`,
+    '',
+  ].join('\n');
+}
+
+function plannedSkillFiles(root: SkillRoot, scope: SkillScope, files: [string, string][]): [string, string][] {
+  if (root.kind === 'skills') return files;
+  return shippedSkills(files)
+    .filter((s) => s.name.startsWith('triz-'))
+    .map((s) => [`${s.name}.toml`, geminiCommand(s.name, s.description, scope)]);
+}
+
+function agentsMdBlock(names: string[], eol: string): string {
+  const lines = [
+    AGENTS_BLOCK_BEGIN,
+    '## triz',
+    '',
+    'This project resolves technical and physical contradictions with the `triz` CLI',
+    '(`npx -y @matthew-cochran/triz`). `triz catalog` is offline; a live `triz analyze` is a paid',
+    'classifier call and needs explicit authorization (`--offline <response.json>` replays one).',
+    '',
+    'Agent skills for it live in `.agents/skills/`:',
+    '',
+    ...names.map((n) => `- \`${n}\`: \`.agents/skills/${n}/SKILL.md\``),
+    '',
+    'This block is managed by `triz skills install --target agents-md`; keep your own notes',
+    'outside the markers.',
+    AGENTS_BLOCK_END,
+  ];
+  return lines.join(eol);
+}
+
+function lineEnding(text: string): string {
+  return text.includes('\r\n') ? '\r\n' : '\n';
+}
+
+/** Character range of the managed AGENTS.md block, from the start of the
+ * begin line to the end of the end line (its terminator excluded). */
+function findAgentsBlock(text: string, shown: string): [number, number] | null {
+  const refuse = (what: string) => Error(`${shown}: ${what}; fix the triz markers by hand (nothing was changed)`);
+  let pos = 0;
+  let open: number | null = null;
+  let found: [number, number] | null = null;
+  for (const line of text.split(/(?<=\n)/)) {
+    const content = line.replace(/\n$/, '').replace(/\r$/, '');
+    const marker = content.trim();
+    if (marker === AGENTS_BLOCK_BEGIN) {
+      if (open !== null) throw refuse(`nested ${AGENTS_BLOCK_BEGIN}`);
+      if (found) throw refuse('more than one triz block');
+      open = pos;
+    } else if (marker === AGENTS_BLOCK_END) {
+      if (open === null) throw refuse(`${AGENTS_BLOCK_END} without a begin marker`);
+      found = [open, pos + content.length];
+      open = null;
+    }
+    pos += line.length;
+  }
+  if (open !== null) throw refuse(`${AGENTS_BLOCK_BEGIN} without ${AGENTS_BLOCK_END}`);
+  return found;
+}
+
+/** Refuse when `path` (under `root`) is a symlink, or a directory between
+ * `root` and `path` is a symlink that resolves outside `root`. */
+function checkInside(root: string, path: string): void {
+  const rel = relative(root, path);
+  if (!rel || rel.startsWith('..') || isAbsolute(rel)) throw Error(`${path} is not under ${root}`);
+  const parts = rel.split(sep);
+  let current = root;
+  for (let i = 0; i < parts.length; i++) {
+    current = join(current, parts[i]);
+    let stat;
+    try {
+      stat = lstatSync(current);
+    } catch {
+      return;
+    }
+    if (!stat.isSymbolicLink()) continue;
+    if (i === parts.length - 1) throw Error(`${current} is a symlink; refusing to write through it`);
+    let inside = false;
+    try {
+      inside = !relative(realpathSync(root), realpathSync(current)).startsWith('..');
+    } catch {
+      inside = false;
+    }
+    if (!inside) throw Error(`refusing to follow the symlink ${current} out of ${root}`);
+  }
+}
+
+/** The file to read and write for `<dir>/AGENTS.md`: the path itself, or the
+ * target of a symlink that resolves to a file inside `dir`. */
+function resolveAgentsMd(dir: string): string {
+  const path = join(dir, 'AGENTS.md');
+  try {
+    if (!lstatSync(path).isSymbolicLink()) return path;
+  } catch {
+    return path;
+  }
+  let resolved: string;
+  try {
+    resolved = realpathSync(path);
+  } catch {
+    throw Error(`${path} is a symlink to a missing file; refusing to write through it`);
+  }
+  const rel = relative(realpathSync(dir), resolved);
+  if (rel.startsWith('..') || isAbsolute(rel) || !statSync(resolved).isFile()) {
+    throw Error(`${path} is a symlink to ${resolved}, which is not a file inside the project ${dir}; refusing to write through it`);
+  }
+  return resolved;
+}
+
+function readIfExists(path: string): Buffer | null {
+  try {
+    return readFileSync(path);
+  } catch (e: any) {
+    if (e?.code === 'ENOENT') return null;
+    throw e;
+  }
+}
+
+/** Write `data` to `path` via a temp file in the same directory and a rename. */
+function writeFileAtomic(path: string, data: string): void {
+  const dir = dirname(path);
+  mkdirSync(dir, { recursive: true });
+  const tmp = join(dir, `.${basename(path)}.triz-tmp-${process.pid}`);
+  rmSync(tmp, { force: true });
+  try {
+    const fd = openSync(tmp, 'wx');
+    try {
+      writeSync(fd, data);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(tmp, path);
+  } catch (e) {
+    rmSync(tmp, { force: true });
+    throw e;
+  }
+}
+
+/** Remove now-empty directories from `path`'s parent up to, not including, `root`. */
+function pruneEmptyDirs(root: string, path: string): void {
+  for (let dir = dirname(path); dir !== root && !relative(root, dir).startsWith('..'); dir = dirname(dir)) {
+    try {
+      rmdirSync(dir);
+    } catch {
+      return;
+    }
+  }
+}
+
+function joinRel(root: string, rel: string): string {
+  return join(root, ...rel.split('/'));
+}
+
+/** Whether a manifest key is a safe relative path this root kind can hold. */
+function validManifestKey(kind: SkillRoot['kind'], key: string, names: string[]): boolean {
+  if (!key || key.startsWith('/') || /[\\:]/.test(key) || /[\u0000-\u001f]/.test(key)) return false;
+  const segments = key.split('/');
+  if (segments.some((s) => !s || s === '.' || s === '..')) return false;
+  if (kind === 'gemini') return segments.length === 1 && /^triz-[a-z0-9-]+\.toml$/.test(key);
+  return segments.length >= 2 && (names.includes(segments[0]) || /^triz(-[a-z0-9-]+)?$/.test(segments[0]));
+}
+
+function loadSkillsManifest(root: SkillRoot, names: string[]): SkillsManifest | null {
+  const path = join(root.dir, SKILLS_MANIFEST_FILE);
+  checkInside(root.dir, path);
+  const bytes = readIfExists(path);
+  if (!bytes) return null;
+  let parsed: any;
+  try {
+    parsed = JSON.parse(bytes.toString('utf8'));
+  } catch (e) {
+    throw Error(`${path} is not a valid manifest (${msg(e)}); remove it to start over`);
+  }
+  if (!parsed || typeof parsed !== 'object' || typeof parsed.files !== 'object' || !parsed.files) {
+    throw Error(`${path} is not a valid manifest; remove it to start over`);
+  }
+  if (typeof parsed.schema !== 'number' || parsed.schema > SKILLS_MANIFEST_SCHEMA) {
+    throw Error(`${path} was written by triz ${parsed.triz_version} (manifest schema ${parsed.schema}); upgrade triz`);
+  }
+  const bad = Object.keys(parsed.files).find((k) => !validManifestKey(root.kind, k, names));
+  if (bad !== undefined) {
+    throw Error(
+      `${path} lists the unsafe or unknown path ${JSON.stringify(bad)}; refusing to touch ${root.dir} (nothing was changed; delete the manifest to start over)`,
+    );
+  }
+  return {
+    schema: parsed.schema,
+    triz_version: String(parsed.triz_version ?? ''),
+    targets: Array.isArray(parsed.targets) ? parsed.targets.map(String) : [],
+    files: { ...parsed.files },
+    ...(typeof parsed.agents_md_block === 'string' ? { agents_md_block: parsed.agents_md_block } : {}),
+    ...(parsed.agents_md_created === true ? { agents_md_created: true } : {}),
+  };
+}
+
+function saveSkillsManifest(dir: string, manifest: SkillsManifest): void {
+  const path = join(dir, SKILLS_MANIFEST_FILE);
+  checkInside(dir, path);
+  if (Object.keys(manifest.files).length === 0 && manifest.agents_md_block === undefined) {
+    rmSync(path, { force: true });
+    return;
+  }
+  const files = Object.fromEntries(Object.entries(manifest.files).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+  const out: SkillsManifest = {
+    schema: SKILLS_MANIFEST_SCHEMA,
+    triz_version: TRIZ_VERSION,
+    targets: [...new Set(manifest.targets)].sort(),
+    files,
+  };
+  if (manifest.agents_md_block !== undefined) out.agents_md_block = manifest.agents_md_block;
+  if (manifest.agents_md_block !== undefined && manifest.agents_md_created) out.agents_md_created = true;
+  writeFileAtomic(path, JSON.stringify(out, null, 2) + '\n');
+}
+
+class SkillsReport {
+  lines: string[] = [];
+  counts = new Map<SkillStatus, number>();
+  record(status: SkillStatus, path: string): void {
+    this.lines.push(`${status}  ${path}`);
+    this.counts.set(status, this.count(status) + 1);
+  }
+  count(status: SkillStatus): number {
+    return this.counts.get(status) ?? 0;
+  }
+  summary(): string {
+    return SKILL_STATUSES.map((s) => `${this.count(s)} ${s.replace(', skipped', ' (skipped)')}`).join(', ');
+  }
+}
+
+type FileOp = {
+  path: string;
+  rel: string;
+  status: SkillStatus | null;
+  write?: string;
+  remove?: boolean;
+  entry: { set: string } | 'keep' | 'drop';
+};
+
+type RootPlan = { root: SkillRoot; manifest: SkillsManifest; ops: FileOp[]; keptBy?: string[] };
+
+function emptyManifest(): SkillsManifest {
+  return { schema: SKILLS_MANIFEST_SCHEMA, triz_version: TRIZ_VERSION, targets: [], files: {} };
+}
+
+/** Remove `rel` if it still matches the manifest; keep it if edited. */
+function planRemoval(root: string, rel: string, recorded: string): FileOp {
+  const path = joinRel(root, rel);
+  checkInside(root, path);
+  const current = readIfExists(path);
+  if (!current) return { path, rel, status: null, entry: 'drop' };
+  if (sha256Hex(current) === recorded) return { path, rel, status: 'removed', remove: true, entry: 'drop' };
+  return { path, rel, status: 'modified, skipped', entry: 'keep' };
+}
+
+function planInstallRoot(root: SkillRoot, scope: SkillScope, target: SkillTarget, force: boolean, files: [string, string][], names: string[]): RootPlan {
+  const old = loadSkillsManifest(root, names);
+  const manifest: SkillsManifest = old ? { ...old, files: { ...old.files } } : emptyManifest();
+  if (!manifest.targets.includes(target)) manifest.targets.push(target);
+  const planned = plannedSkillFiles(root, scope, files);
+  const ops: FileOp[] = [];
+  for (const [rel, content] of planned) {
+    const path = joinRel(root.dir, rel);
+    checkInside(root.dir, path);
+    const current = readIfExists(path);
+    const recorded = old?.files[rel];
+    const hash = sha256Hex(content);
+    if (!current) ops.push({ path, rel, status: 'created', write: content, entry: { set: hash } });
+    else if (current.equals(Buffer.from(content))) ops.push({ path, rel, status: 'unchanged', entry: { set: hash } });
+    else if (force || recorded === sha256Hex(current)) ops.push({ path, rel, status: 'updated', write: content, entry: { set: hash } });
+    else ops.push({ path, rel, status: recorded ? 'modified, skipped' : 'foreign, skipped', entry: 'keep' });
+  }
+  // Files an older triz wrote that this one no longer ships.
+  for (const [rel, recorded] of Object.entries(old?.files ?? {})) {
+    if (!planned.some(([p]) => p === rel)) ops.push(planRemoval(root.dir, rel, recorded));
+  }
+  return { root, manifest, ops };
+}
+
+function planUninstallRoot(root: SkillRoot, target: SkillTarget, names: string[]): RootPlan | null {
+  const manifest = loadSkillsManifest(root, names);
+  if (!manifest) return null;
+  const remaining = manifest.targets.filter((t) => t !== target);
+  manifest.targets = remaining;
+  if (remaining.length > 0) return { root, manifest, ops: [], keptBy: remaining.sort() };
+  const ops = Object.entries(manifest.files).map(([rel, recorded]) => planRemoval(root.dir, rel, recorded));
+  return { root, manifest, ops };
+}
+
+/** Run a root plan. On a failed write the manifest is saved for what was done
+ * so far, so the next run still recognizes those files. */
+function executeRootPlan(plan: RootPlan, dryRun: boolean, report: SkillsReport): void {
+  const manifest = { ...plan.manifest, files: { ...plan.manifest.files } };
+  for (const op of plan.ops) {
+    if (!dryRun) {
+      try {
+        if (op.write !== undefined) writeFileAtomic(op.path, op.write);
+        else if (op.remove) {
+          rmSync(op.path);
+          pruneEmptyDirs(plan.root.dir, op.path);
+        }
+      } catch (e) {
+        saveSkillsManifest(plan.root.dir, manifest);
+        throw e;
+      }
+    }
+    if (op.entry === 'drop') delete manifest.files[op.rel];
+    else if (op.entry !== 'keep') manifest.files[op.rel] = op.entry.set;
+    if (op.status) report.record(op.status, op.path);
+  }
+  if (plan.keptBy) report.lines.push(`kept (still used by ${plan.keptBy.join(', ')})  ${plan.root.dir}`);
+  if (!dryRun) saveSkillsManifest(plan.root.dir, manifest);
+}
+
+type AgentsPlan = {
+  shown: string;
+  file: string;
+  status: SkillStatus;
+  newText?: string;
+  /** The block hash to record; `null` clears it; `undefined` leaves the manifest alone. */
+  record?: string | null;
+  created: boolean;
+  deleteFile: boolean;
+};
+
+function planInstallAgentsMd(dir: string, names: string[], recorded: string | undefined, force: boolean): AgentsPlan {
+  const shown = join(dir, 'AGENTS.md');
+  const file = resolveAgentsMd(dir);
+  const existing = readIfExists(file)?.toString('utf8') ?? null;
+  const eol = existing === null ? '\n' : lineEnding(existing);
+  const block = agentsMdBlock(names, eol);
+  let status: SkillStatus;
+  let newText: string | undefined;
+  if (existing === null) {
+    status = 'created';
+    newText = `${block}${eol}`;
+  } else {
+    const range = findAgentsBlock(existing, shown);
+    if (!range) {
+      status = 'updated';
+      if (existing === '') newText = `${block}${eol}`;
+      else if (existing.endsWith(eol)) newText = `${existing}${eol}${block}${eol}`;
+      else newText = `${existing}${eol}${eol}${block}`;
+    } else {
+      const current = existing.slice(range[0], range[1]);
+      if (current === block) status = 'unchanged';
+      else if (force || recorded === sha256Hex(current)) {
+        status = 'updated';
+        newText = existing.slice(0, range[0]) + block + existing.slice(range[1]);
+      } else status = recorded ? 'modified, skipped' : 'foreign, skipped';
+    }
+  }
+  const ours = status === 'created' || status === 'updated' || status === 'unchanged';
+  return { shown, file, status, newText, record: ours ? sha256Hex(block) : undefined, created: existing === null, deleteFile: false };
+}
+
+function planUninstallAgentsMd(dir: string, recorded: string | undefined, created: boolean): AgentsPlan | null {
+  const shown = join(dir, 'AGENTS.md');
+  const file = resolveAgentsMd(dir);
+  const text = readIfExists(file)?.toString('utf8');
+  if (text === undefined) return null;
+  const range = findAgentsBlock(text, shown);
+  if (!range) return null;
+  if (recorded !== sha256Hex(text.slice(range[0], range[1]))) {
+    return { shown, file, status: recorded ? 'modified, skipped' : 'foreign, skipped', created: false, deleteFile: false };
+  }
+  // Undo exactly what install added, so install + uninstall is byte-identical.
+  const eol = lineEnding(text);
+  const before = text.slice(0, range[0]);
+  const after = text.slice(range[1]);
+  const terminator = after.startsWith('\r\n') ? '\r\n' : after.startsWith('\n') ? '\n' : '';
+  let rest: string;
+  if (after === '') rest = before.endsWith(eol + eol) ? before.slice(0, -2 * eol.length) : before;
+  else if (after === terminator) rest = before.endsWith(terminator) ? before.slice(0, -terminator.length) : before;
+  else rest = before + after.slice(terminator.length);
+  const deleteFile = rest === '' && created;
+  return { shown, file, status: 'removed', newText: deleteFile ? undefined : rest, record: null, created: false, deleteFile };
+}
+
+function executeAgentsPlan(plan: AgentsPlan, skillsRoot: SkillRoot, names: string[], dryRun: boolean, report: SkillsReport): void {
+  report.record(plan.status, plan.shown);
+  if (dryRun) return;
+  if (plan.deleteFile) rmSync(plan.file);
+  else if (plan.newText !== undefined) writeFileAtomic(plan.file, plan.newText);
+  if (plan.record === undefined) return;
+  const manifest = loadSkillsManifest(skillsRoot, names) ?? emptyManifest();
+  if (plan.record === null) {
+    delete manifest.agents_md_block;
+    delete manifest.agents_md_created;
+  } else {
+    manifest.agents_md_created = plan.created || manifest.agents_md_created === true;
+    manifest.agents_md_block = plan.record;
+  }
+  saveSkillsManifest(skillsRoot.dir, manifest);
+}
+
+type SkillsOptions = { target?: SkillTarget; scope?: SkillScope; dryRun: boolean; force: boolean };
+
+const SKILLS_COMMANDS: Record<string, CliCommandSpec> = {
+  install: {
+    name: 'skills install',
+    options: { target: { hasValue: true }, project: { hasValue: true }, user: { hasValue: false }, 'dry-run': { hasValue: false }, force: { hasValue: false } },
+    minPositional: 0,
+    maxPositional: 0,
+    usage: SKILLS_USAGE,
+  },
+  uninstall: {
+    name: 'skills uninstall',
+    options: { target: { hasValue: true }, project: { hasValue: true }, user: { hasValue: false }, 'dry-run': { hasValue: false } },
+    minPositional: 0,
+    maxPositional: 0,
+    usage: SKILLS_USAGE,
+  },
+  list: {
+    name: 'skills list',
+    options: { project: { hasValue: true }, user: { hasValue: false } },
+    minPositional: 0,
+    maxPositional: 0,
+    usage: SKILLS_USAGE,
+  },
+};
+
+function skillsOptions(flags: Record<string, string | true>): SkillsOptions {
+  const opts: SkillsOptions = { dryRun: flags['dry-run'] === true, force: flags.force === true };
+  if (typeof flags.target === 'string') {
+    if (!(SKILL_TARGETS as readonly string[]).includes(flags.target)) {
+      throw new SkillsUsageError(`unknown target: ${flags.target} (${SKILL_TARGETS.join(', ')})`);
+    }
+    opts.target = flags.target as SkillTarget;
+  }
+  if (typeof flags.project === 'string' && flags.user === true) throw new SkillsUsageError('give one of --project <dir> or --user');
+  if (typeof flags.project === 'string') {
+    const dir = resolve(flags.project);
+    let isDir = false;
+    try {
+      isDir = statSync(dir).isDirectory();
+    } catch {
+      isDir = false;
+    }
+    if (!isDir) throw new SkillsUsageError(`--project ${flags.project}: not an existing directory`);
+    opts.scope = { kind: 'project', base: dir };
+  }
+  if (flags.user === true) opts.scope = { kind: 'user', base: skillsHome() };
+  return opts;
+}
+
+function requireTargetAndScope(opts: SkillsOptions): { target: SkillTarget; scope: SkillScope } {
+  if (!opts.target) throw new SkillsUsageError('--target <target> is required');
+  if (!opts.scope) throw new SkillsUsageError('give one of --project <dir> or --user');
+  if (opts.target === 'agents-md' && opts.scope.kind === 'user') {
+    throw new SkillsUsageError('--target agents-md is project only (there is no user-level AGENTS.md); for user scope use --target codex --user');
+  }
+  return { target: opts.target, scope: opts.scope };
+}
+
+function skillsInstall(opts: SkillsOptions): string[] {
+  const { target, scope } = requireTargetAndScope(opts);
+  const files = shippedSkillFiles();
+  const names = shippedSkills(files).map((s) => s.name);
+  const roots = rootsFor(target, scope);
+  // Validate and plan everything before the first write.
+  const plans = roots.map((root) => planInstallRoot(root, scope, target, opts.force, files, names));
+  const agents = target === 'agents-md' ? planInstallAgentsMd(scope.base, names, plans[0].manifest.agents_md_block, opts.force) : null;
+  const report = new SkillsReport();
+  for (const plan of plans) executeRootPlan(plan, opts.dryRun, report);
+  if (agents) executeAgentsPlan(agents, roots[0], names, opts.dryRun, report);
+  const out = [...report.lines];
+  out.push(
+    `triz ${TRIZ_VERSION} skills install --target ${target} (${scope.kind}): ${report.summary()}${opts.dryRun ? ' (dry run: nothing written)' : ''}`,
+  );
+  if (report.count('modified, skipped') + report.count('foreign, skipped') > 0) {
+    out.push('Skipped files were kept as they are; rerun with --force to overwrite them.');
+  }
+  if (target === 'all') {
+    out.push(
+      'Note: --target all writes .claude/skills (Claude Code) and .agents/skills (Codex, Gemini and others) only. ' +
+        'Cursor and Copilot read both directories and may list each skill twice; to avoid that, install with --target cursor or --target copilot alone.',
+    );
+  }
+  return out;
+}
+
+function skillsUninstall(opts: SkillsOptions): string[] {
+  const { target, scope } = requireTargetAndScope(opts);
+  const names = shippedSkills(shippedSkillFiles()).map((s) => s.name);
+  const isDir = (dir: string) => {
+    try {
+      return statSync(dir).isDirectory();
+    } catch {
+      return false;
+    }
+  };
+  const roots = rootsFor(target, scope).filter((r) => isDir(r.dir));
+  const plans = roots.map((root) => planUninstallRoot(root, target, names)).filter((p): p is RootPlan => p !== null);
+  const agentsSkills = agentsRoot(scope.base);
+  let agents: AgentsPlan | null = null;
+  if (target === 'agents-md') {
+    const manifest = plans.find((p) => p.root.dir === agentsSkills.dir)?.manifest;
+    agents = planUninstallAgentsMd(scope.base, manifest?.agents_md_block, manifest?.agents_md_created === true);
+  }
+  const report = new SkillsReport();
+  for (const plan of plans) executeRootPlan(plan, opts.dryRun, report);
+  if (agents) executeAgentsPlan(agents, agentsSkills, names, opts.dryRun, report);
+  if (!opts.dryRun) {
+    for (const root of roots) {
+      try {
+        rmdirSync(root.dir);
+      } catch {
+        // Not empty: it still holds someone's files.
+      }
+    }
+  }
+  return [
+    ...report.lines,
+    `triz ${TRIZ_VERSION} skills uninstall --target ${target} (${scope.kind}): ${report.summary()}${opts.dryRun ? ' (dry run: nothing removed)' : ''}`,
+  ];
+}
+
+function skillsList(opts: SkillsOptions): string[] {
+  const scopes: SkillScope[] = opts.scope
+    ? [opts.scope]
+    : [
+        { kind: 'user', base: skillsHome() },
+        { kind: 'project', base: process.cwd() },
+      ];
+  const names = shippedSkills(shippedSkillFiles()).map((s) => s.name);
+  const out: string[] = [];
+  let found = 0;
+  for (const scope of scopes) {
+    for (const root of allSkillRoots(scope)) {
+      const manifest = loadSkillsManifest(root, names);
+      if (!manifest) continue;
+      const entries = Object.entries(manifest.files);
+      let modified = 0;
+      let missing = 0;
+      for (const [rel, recorded] of entries) {
+        const current = readIfExists(joinRel(root.dir, rel));
+        if (!current) missing++;
+        else if (sha256Hex(current) !== recorded) modified++;
+      }
+      const label = `(${scope.kind}) triz ${manifest.triz_version}`;
+      if (entries.length > 0) {
+        found++;
+        out.push(`${root.dir}  ${label} [${manifest.targets.join(', ')}]: ${entries.length} files, ${modified} modified, ${missing} missing`);
+      }
+      if (manifest.agents_md_block !== undefined) {
+        found++;
+        out.push(`${join(dirname(dirname(root.dir)), 'AGENTS.md')}  ${label}: managed block`);
+      }
+    }
+  }
+  out.push(`${found} triz skill installs found under ${scopes.map((s) => s.base).join(', ')}`);
+  return out;
+}
+
+function cliSkills(args: string[]): number {
+  const [sub, ...rest] = args;
+  if (sub === undefined) {
+    reportCliError('missing skills command (install, uninstall, list)', SKILLS_USAGE);
+    return 1;
+  }
+  if (sub === '--help' || sub === '-h' || sub === 'help') {
+    console.log(SKILLS_USAGE);
+    return 0;
+  }
+  const spec = SKILLS_COMMANDS[sub];
+  if (!spec) {
+    reportCliError(`unknown skills command: ${sub}`, SKILLS_USAGE);
+    return 1;
+  }
+  const parsed = parseCommandArgs(spec, rest);
+  if (parsed.kind === 'help') {
+    console.log(SKILLS_USAGE);
+    return 0;
+  }
+  if (parsed.kind === 'error') {
+    reportCliError(parsed.message, SKILLS_USAGE);
+    return 1;
+  }
+  try {
+    const opts = skillsOptions(parsed.flags);
+    const lines = sub === 'install' ? skillsInstall(opts) : sub === 'uninstall' ? skillsUninstall(opts) : skillsList(opts);
+    console.log(lines.join('\n'));
+    return 0;
+  } catch (e) {
+    if (e instanceof SkillsUsageError) {
+      reportCliError(e.message, SKILLS_USAGE);
+    } else {
+      console.error(`error: ${msg(e)}`);
+    }
+    return 1;
+  }
+}
+
 export async function runCli(argv: string[]): Promise<number> {
   const [command, ...rest] = argv;
   if (command === undefined) {
@@ -1290,10 +2071,15 @@ export async function runCli(argv: string[]): Promise<number> {
     console.log(MAIN_USAGE);
     return 0;
   }
+  if (command === '--version' || command === '-V') {
+    console.log(`triz ${TRIZ_VERSION}`);
+    return 0;
+  }
   if (command.startsWith('-')) {
     reportCliError(`unknown option: ${command}`, MAIN_USAGE);
     return 1;
   }
+  if (command === 'skills') return cliSkills(rest);
   const spec = CLI_COMMANDS[command];
   if (!spec) {
     reportCliError(`unknown command: ${command}`, MAIN_USAGE);
