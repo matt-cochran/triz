@@ -1,6 +1,6 @@
 {
   "name": "@matthew-cochran/triz",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Architecture-independent TRIZ contradiction classification CLI and library, compiled to JavaScript.",
   "type": "module",
   "main": "./dist/triz.js",
