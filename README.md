@@ -101,10 +101,16 @@ triz catalog
 # Show help (global or per command):
 triz --help
 triz analyze --help
+
+# Print the installed version (`triz <version>`):
+triz --version
 ```
 
 Options: `--offline <response.json>`, `--out <result.json>`,
 `--provider <provider>`, `--model <model>`, `--timeout-ms <n>`.
+
+`triz --version` (or `-V`) prints exactly one line, `triz <version>`, read from
+the package's own `package.json`, and exits `0`.
 
 Every command also accepts `-h`/`--help`, which prints usage to stdout and
 exits `0` without reading input files, writing output, or contacting a

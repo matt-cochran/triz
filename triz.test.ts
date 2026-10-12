@@ -752,3 +752,23 @@ test('analyze accepts a numeric timeout option', () => {
   assert.equal(JSON.parse(readFileSync(outPath, 'utf8')).classification, 'technical');
   rmSync(dir, { recursive: true, force: true });
 });
+
+// --- CLI version ------------------------------------------------------------
+
+const packageVersion = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version;
+
+test('--version exits zero', () => {
+  assert.equal(runTriz(['--version']).status, 0);
+});
+
+test('--version prints only the triz package version line', () => {
+  assert.equal(runTriz(['--version']).stdout, `triz ${packageVersion}\n`);
+});
+
+test('-V prints only the triz package version line', () => {
+  assert.equal(runTriz(['-V']).stdout, `triz ${packageVersion}\n`);
+});
+
+test('top-level --help lists the version flag', () => {
+  assert.match(runTriz(['--help']).stdout, /-V, --version/);
+});

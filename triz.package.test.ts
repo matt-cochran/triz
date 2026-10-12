@@ -212,3 +212,7 @@ test('packaged CLI runs after installation into a temporary prefix', () => {
   assert.equal(JSON.parse(run.stdout).canonicalMatrixLookup, false);
   rmSync(prefix, { recursive: true, force: true });
 });
+
+test('compiled CLI --version prints the package version', () => {
+  assert.equal(runNode([distCli, '--version']).stdout, `triz ${pkg.version}\n`);
+});

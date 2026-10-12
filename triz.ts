@@ -1107,6 +1107,30 @@ export async function analyze(requestInput: unknown, options: AnalyzeOptions = {
 }
 
 // ---------------------------------------------------------------------------
+// Package location and version
+// ---------------------------------------------------------------------------
+
+const PACKAGE_NAME = '@matthew-cochran/triz';
+
+/** The directory holding this package's package.json: the module's own
+ * directory when run from source (`triz.ts`), or its parent when run from the
+ * compiled `dist/triz.js`, whether in a checkout or an installed package. */
+function packageRoot(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  for (const dir of [here, dirname(here)]) {
+    try {
+      if (JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')).name === PACKAGE_NAME) return dir;
+    } catch {
+      // Not this directory; try the next candidate.
+    }
+  }
+  throw Error(`cannot find the ${PACKAGE_NAME} package.json next to ${here}`);
+}
+
+export const PACKAGE_ROOT = packageRoot();
+export const TRIZ_VERSION: string = JSON.parse(readFileSync(join(PACKAGE_ROOT, 'package.json'), 'utf8')).version;
+
+// ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 
@@ -1161,6 +1185,7 @@ const MAIN_USAGE = [
   '',
   'Options:',
   '  -h, --help              Show help',
+  '  -V, --version           Print the triz version',
   '',
   'Run "triz <command> --help" for command-specific options.',
 ].join('\n');
@@ -1288,6 +1313,10 @@ export async function runCli(argv: string[]): Promise<number> {
   }
   if (command === '--help' || command === '-h' || command === 'help') {
     console.log(MAIN_USAGE);
+    return 0;
+  }
+  if (command === '--version' || command === '-V') {
+    console.log(`triz ${TRIZ_VERSION}`);
     return 0;
   }
   if (command.startsWith('-')) {
