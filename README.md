@@ -166,6 +166,10 @@ target is uninstalled. Every change is planned before the first write, and each
 file is written atomically. `--dry-run` reports the plan and writes nothing.
 The installer never writes MCP configuration. `list` reports installs under
 the user home and the current directory, or only under the scope you give.
+Concurrent runs on the same skills directory are serialized by a
+`.triz-skills.lock` file, and a stale lock left by a dead process is recovered.
+`TRIZ_SKILLS_LOCK_WAIT_MS` sets how long a run waits for a busy lock (default
+5000 ms).
 
 ## Request format
 
