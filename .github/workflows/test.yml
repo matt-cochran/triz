@@ -1,56 +1,82 @@
+# Build on Blacksmith once for staging; verify retained results on production promotion.
 name: Test
-
-# Branch flow: feature branches squash-merge into dev; dev merge-commits into
-# main (production); release tags are cut from main. See CONTRIBUTING.md.
 on:
   push:
-    branches: [main, dev]
+    branches:
+    - dev
+    - staging
+    - main
   pull_request:
+    branches:
+    - dev
+    - staging
+    - main
+  workflow_dispatch: null
+  workflow_call:
 
 permissions:
   contents: read
-
+  actions: read
+  pull-requests: read
+concurrency:
+  group: retained-test.yml-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
-  source-branch:
-    # A required check on both dev and main: only dev, from this repository,
-    # may be merged into main. It passes for every other event.
-    name: PR source branch
-    runs-on: ubuntu-22.04
+  resolve:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft != true }}
+    runs-on: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    outputs:
+      build-required: ${{ steps.resolve.outputs.build-required }}
+      run-id: ${{ steps.resolve.outputs.run-id }}
     steps:
-      - name: Only dev may merge into main
-        if: github.event_name == 'pull_request' && github.base_ref == 'main'
-        env:
-          HEAD_REF: ${{ github.head_ref }}
-          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-        run: |
-          if [ "$HEAD_REF" != "dev" ] || [ "$HEAD_REPO" != "$GITHUB_REPOSITORY" ]; then
-            echo "::error::Pull requests into main must come from $GITHUB_REPOSITORY:dev (got $HEAD_REPO:$HEAD_REF). Target dev instead."
-            exit 1
-          fi
-          echo "Source branch is dev."
-
-  test:
-    name: node ${{ matrix.node }} on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-22.04
-          - ubuntu-22.04-arm
-          - macos-15-intel
-          - macos-15
-          - windows-latest
-          - windows-11-arm
-        node: [24, 26]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          node-version: ${{ matrix.node }}
-          cache: npm
-      - run: npm ci
-      # Offline behavior tests plus compiled CLI and packaged-install smoke.
-      # `pretest` compiles triz.ts to dist/triz.js before the suite runs.
-      - run: npm test
-      - run: npm run build
+          persist-credentials: false
+      - id: resolve
+        uses: ./.github/actions/retained-build
+        with:
+          mode: resolve
+          runner-mode: ${{ vars.CI_RUNNER_MODE || 'github' }}
+          runner-label: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'github' }}
+          workflow: test.yml
+          token: ${{ github.token }}
+  checks:
+    needs: resolve
+    if: needs.resolve.outputs.build-required == 'true'
+    uses: ./.github/workflows/test-checks.yml
+    secrets: inherit
+  build-gate:
+    name: Build gate
+    needs: [resolve, checks]
+    if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.draft != true) }}
+    runs-on: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'ubuntu-latest' }}
+    steps:
+      - name: Require full checks or verified retained staging results
+        env:
+          RESOLVE_RESULT: ${{ needs.resolve.result }}
+          BUILD_REQUIRED: ${{ needs.resolve.outputs.build-required }}
+          CHECKS_RESULT: ${{ needs.checks.result }}
+          SOURCE_RUN: ${{ needs.resolve.outputs.run-id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RESOLVE_RESULT" = success
+          if [ "$BUILD_REQUIRED" = true ]; then
+            test "$CHECKS_RESULT" = success
+          else
+            test "$BUILD_REQUIRED" = false
+            test -n "$SOURCE_RUN"
+            test "$CHECKS_RESULT" = skipped
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        if: needs.resolve.outputs.build-required == 'true'
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/retained-build
+        if: needs.resolve.outputs.build-required == 'true'
+        with:
+          mode: record
+          runner-mode: ${{ vars.CI_RUNNER_MODE || 'github' }}
+          runner-label: ${{ vars.CI_RUNNER_MODE == 'blacksmith' && 'blacksmith-2vcpu-ubuntu-2404' || 'github' }}
+          workflow: test.yml
+          token: ${{ github.token }}
