@@ -10,6 +10,9 @@ import { fileURLToPath } from 'node:url';
 import {
   analyze,
   buildQuestions,
+  buildRelevanceQuestions,
+  adaptRelevanceResponse,
+  rankPrinciples,
   hashInput,
   validateRequest,
   inspectResult,
@@ -18,6 +21,8 @@ import {
   CATALOG,
   CATALOG_VERSION,
   SCHEMA_VERSION,
+  MAX_RANKED_PRINCIPLES,
+  TrizRequestError,
   type ClassifierVerdict,
 } from './triz.ts';
 
@@ -99,6 +104,45 @@ const insufficientVerdict: ClassifierVerdict = {
   grounding: true,
 };
 
+const mixedFramingRequest = {
+  evidence: [{ id: 'M1', text: 'The cache must be large and small at once.' }],
+  desiredImprovement: 'Improve hit rate',
+  worseningOutcome: 'Memory use',
+  element: 'response cache',
+  opposingProperties: ['large for hit rate', 'small for memory'],
+};
+
+const partialPhysicalRequest = {
+  evidence: [{ id: 'P1', text: 'The cache must be large.' }],
+  desiredImprovement: 'Improve hit rate',
+  element: 'response cache',
+  opposingProperties: ['large for hit rate'],
+};
+
+/** Five qualifying principles plus one below the floor. */
+const sortedRelevance: Record<string, number> = { '1': 0.6, '2': 0.9, '3': 0.7, '4': 0.8, '5': 0.5, '6': 0.2 };
+
+/** Ten qualifying principles so the shortlist cap can be observed. */
+const tenRelevance: Record<string, number> = Object.fromEntries(
+  Array.from({ length: 10 }, (_, i) => [String(i + 1), 0.95 - i * 0.01]),
+);
+
+/** Only two principles clear the floor, forcing the top-three fallback. */
+const sparseRelevance: Record<string, number> = { '1': 0.9, '2': 0.7, '3': 0.3, '4': 0.2 };
+
+const physicalRelevance: Record<string, number> = {
+  'space-separation': 0.9,
+  'time-separation': 0.7,
+  'condition-separation': 0.3,
+  'system-level-separation': 0.6,
+};
+
+function relevanceAnswers(map: Record<string, number>) {
+  const answers: Record<string, { type: 'bool'; probability: number }> = {};
+  for (const [id, probability] of Object.entries(map)) answers[`relevance_${id}`] = { type: 'bool', probability };
+  return { answers };
+}
+
 function tempDir(): string {
   return mkdtempSync(join(tmpdir(), 'triz-'));
 }
@@ -144,12 +188,9 @@ test('analyze classifies a response citing unknown evidence ids as uncertain', a
   assert.equal(result.classification, 'uncertain');
 });
 
-test('technical results recommend the complete forty-principle catalog in order', async () => {
-  const result = await analyze(technicalRequest, { offline: technicalVerdict });
-  assert.deepEqual(
-    result.principles.map((p) => p.id),
-    Array.from({ length: 40 }, (_, i) => String(i + 1)),
-  );
+test('confident technical results return a ranked shortlist capped at eight principles', async () => {
+  const result = await analyze(technicalRequest, { offline: { ...technicalVerdict, relevance: tenRelevance } });
+  assert.equal(result.principles.length, MAX_RANKED_PRINCIPLES);
 });
 
 test('physical results recommend the six resolution routes in order', async () => {
@@ -179,6 +220,333 @@ test('uncertain results carry no principle recommendations', async () => {
     offline: { classification: 'bogus', confidence: 0.9, evidenceIds: ['E1'], grounding: true },
   });
   assert.deepEqual(result.principles, []);
+});
+
+// --- Ranked shortlist -------------------------------------------------------
+
+test('confident technical shortlist is sorted by relevance descending', async () => {
+  const result = await analyze(technicalRequest, { offline: { ...technicalVerdict, relevance: sortedRelevance } });
+  assert.deepEqual(result.principles.map((p) => p.id), ['2', '4', '3', '1', '5']);
+});
+
+test('confident technical shortlist assigns rank starting at one', async () => {
+  const result = await analyze(technicalRequest, { offline: { ...technicalVerdict, relevance: sortedRelevance } });
+  assert.equal(result.principles[0].rank, 1);
+});
+
+test('confident technical shortlist carries the relevance of each principle', async () => {
+  const result = await analyze(technicalRequest, { offline: { ...technicalVerdict, relevance: sortedRelevance } });
+  assert.equal(result.principles[0].relevance, 0.9);
+});
+
+test('confident technical shortlist gives every principle a non-empty reason', async () => {
+  const result = await analyze(technicalRequest, { offline: { ...technicalVerdict, relevance: sortedRelevance } });
+  assert.equal(result.principles.every((p) => typeof p.reason === 'string' && p.reason.length > 0), true);
+});
+
+test('confident technical shortlist excludes principles below the relevance floor', async () => {
+  const result = await analyze(technicalRequest, { offline: { ...technicalVerdict, relevance: sortedRelevance } });
+  assert.equal(result.principles.some((p) => p.id === '6'), false);
+});
+
+test('confident shortlist falls back to the top three when fewer than three qualify', async () => {
+  const result = await analyze(technicalRequest, { offline: { ...technicalVerdict, relevance: sparseRelevance } });
+  assert.deepEqual(result.principles.map((p) => p.id), ['1', '2', '3']);
+});
+
+test('confident shortlist flags the below-threshold fallback principles', async () => {
+  const result = await analyze(technicalRequest, { offline: { ...technicalVerdict, relevance: sparseRelevance } });
+  assert.equal(result.principles.every((p) => p.belowThreshold === true), true);
+});
+
+test('confident technical result without relevance returns the full unranked catalog', async () => {
+  const result = await analyze(technicalRequest, { offline: technicalVerdict });
+  assert.equal(result.principles.length, CATALOG.technical.length);
+});
+
+test('confident technical result without relevance leaves principles unranked', async () => {
+  const result = await analyze(technicalRequest, { offline: technicalVerdict });
+  assert.equal(result.principles.every((p) => p.rank === undefined), true);
+});
+
+test('confident technical result without relevance notes that ranking was unavailable', async () => {
+  const result = await analyze(technicalRequest, { offline: technicalVerdict });
+  assert.equal(result.notes.some((n) => /ranking was unavailable/i.test(n)), true);
+});
+
+test('rankPrinciples caps a fully qualifying catalog at eight principles', () => {
+  const verdict = {
+    classification: 'technical' as const,
+    confidence: 0.9,
+    groundedEvidenceIds: ['E1'],
+    rationale: '',
+    notes: [],
+  };
+  const ranked = rankPrinciples(CATALOG.technical.map((p) => ({ ...p })), tenRelevance, technicalRequest, verdict);
+  assert.equal(ranked.length, MAX_RANKED_PRINCIPLES);
+});
+
+test('confident physical shortlist reason names the element and evidence', async () => {
+  const result = await analyze(physicalRequest, { offline: { ...physicalVerdict, relevance: physicalRelevance } });
+  assert.match(result.principles[0].reason ?? '', /response cache.*P1/);
+});
+
+// --- Rationale --------------------------------------------------------------
+
+test('confident technical result rationale names the desired improvement', async () => {
+  const result = await analyze(technicalRequest, {
+    offline: { ...technicalVerdict, rationale: '', relevance: sortedRelevance },
+  });
+  assert.match(result.rationale, /Reduce dashboard latency/);
+});
+
+test('confident technical result rationale names the worsening outcome', async () => {
+  const result = await analyze(technicalRequest, {
+    offline: { ...technicalVerdict, rationale: '', relevance: sortedRelevance },
+  });
+  assert.match(result.rationale, /Data freshness/);
+});
+
+test('confident technical result rationale names the grounded evidence ids', async () => {
+  const result = await analyze(technicalRequest, {
+    offline: { ...technicalVerdict, rationale: '', relevance: sortedRelevance },
+  });
+  assert.match(result.rationale, /E1, E2/);
+});
+
+test('confident physical result rationale names the element and opposing properties', async () => {
+  const result = await analyze(physicalRequest, { offline: { ...physicalVerdict, relevance: physicalRelevance } });
+  assert.match(result.rationale, /response cache.*large for hit rate and small for memory/);
+});
+
+// --- needs ------------------------------------------------------------------
+
+test('uncertain result needs more evidence that states the trade-off directly', async () => {
+  const result = await analyze(technicalRequest, {
+    offline: { classification: 'bogus', confidence: 0.9, evidenceIds: ['E1'], grounding: true },
+  });
+  assert.equal(result.needs.includes('more evidence that states the trade-off directly'), true);
+});
+
+test('uncertain result needs carries the classifier note reason', async () => {
+  const result = await analyze(technicalRequest, {
+    offline: { classification: 'bogus', confidence: 0.9, evidenceIds: ['E1'], grounding: true },
+  });
+  assert.equal(result.needs.some((n) => /unknown classification/i.test(n)), true);
+});
+
+test('insufficient technical result needs the worsening outcome', async () => {
+  const result = await analyze(noneRequest, {
+    offline: { classification: 'technical', confidence: 0.9, evidenceIds: ['N1'], grounding: true },
+  });
+  assert.deepEqual(result.needs, ['worseningOutcome']);
+});
+
+test('insufficient physical result needs the element and opposing properties', async () => {
+  const result = await analyze(partialPhysicalRequest, {
+    offline: { classification: 'physical', confidence: 0.9, evidenceIds: ['P1'], grounding: true },
+  });
+  assert.deepEqual(result.needs, ['element', 'opposingProperties']);
+});
+
+// --- Mixed framing ----------------------------------------------------------
+
+test('validateRequest rejects mixed framing with code mixed_framing', () => {
+  assert.throws(
+    () => validateRequest(mixedFramingRequest),
+    (e: any) => e instanceof TrizRequestError && e.code === 'mixed_framing',
+  );
+});
+
+test('mixed-framing message tells the caller to split the request', () => {
+  assert.throws(() => validateRequest(mixedFramingRequest), /split/i);
+});
+
+test('analyze rejects mixed framing before calling the classifier', async () => {
+  let called = false;
+  await analyze(mixedFramingRequest, {
+    classify: async () => {
+      called = true;
+      return {};
+    },
+  }).catch(() => {});
+  assert.equal(called, false);
+});
+
+test('CLI analyze prints error[mixed_framing] for a mixed-framing request', () => {
+  const dir = tempDir();
+  const requestPath = join(dir, 'request.json');
+  const fixturePath = join(dir, 'response.json');
+  writeFileSync(requestPath, JSON.stringify(mixedFramingRequest));
+  writeFileSync(fixturePath, JSON.stringify(technicalVerdict));
+  const run = runTriz(['analyze', requestPath, '--offline', fixturePath]);
+  assert.match(run.stderr, /error\[mixed_framing\]/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('CLI analyze exits one for a mixed-framing request', () => {
+  const dir = tempDir();
+  const requestPath = join(dir, 'request.json');
+  const fixturePath = join(dir, 'response.json');
+  writeFileSync(requestPath, JSON.stringify(mixedFramingRequest));
+  writeFileSync(fixturePath, JSON.stringify(technicalVerdict));
+  const run = runTriz(['analyze', requestPath, '--offline', fixturePath]);
+  assert.equal(run.status, 1);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// --- Relevance questions and adapter ----------------------------------------
+
+test('relevance questions build one boolean per technical principle', () => {
+  const questions = buildRelevanceQuestions(technicalRequest, 'technical');
+  assert.equal(Object.keys(questions).length, CATALOG.technical.length);
+});
+
+test('relevance questions use the relevance key prefix', () => {
+  const questions = buildRelevanceQuestions(technicalRequest, 'technical');
+  assert.equal(Object.keys(questions).every((k) => k.startsWith('relevance_')), true);
+});
+
+test('relevance question instruction names the principle and heuristic', () => {
+  const questions = buildRelevanceQuestions(technicalRequest, 'technical');
+  assert.match(questions.relevance_1.instructions, /segmentation/);
+});
+
+test('relevance questions for physical cover the six resolution routes', () => {
+  const questions = buildRelevanceQuestions(physicalRequest, 'physical');
+  assert.equal(Object.keys(questions).length, CATALOG.physical.length);
+});
+
+test('adaptRelevanceResponse maps a boolean answer to its principle probability', () => {
+  assert.deepEqual(adaptRelevanceResponse(relevanceAnswers({ '1': 0.8 })), { '1': 0.8 });
+});
+
+test('adaptRelevanceResponse drops answers for unknown principle ids', () => {
+  assert.deepEqual(adaptRelevanceResponse(relevanceAnswers({ '999': 0.8 })), {});
+});
+
+test('adaptRelevanceResponse drops non-finite probabilities', () => {
+  const response = { answers: { relevance_1: { type: 'bool', probability: Number.NaN } } };
+  assert.deepEqual(adaptRelevanceResponse(response), {});
+});
+
+test('adaptRelevanceResponse ignores non-boolean answers', () => {
+  const response = { answers: { relevance_1: { type: 'choice', choice: 'yes', confidence: 0.9 } } };
+  assert.deepEqual(adaptRelevanceResponse(response), {});
+});
+
+// --- Live relevance path ----------------------------------------------------
+
+test('live confident technical result makes a second relevance classifier call', async () => {
+  let calls = 0;
+  const classify = async () => {
+    calls++;
+    if (calls === 1) {
+      return {
+        answers: {
+          classification: { type: 'choice', choice: 'technical', confidence: 0.9 },
+          evidence_grounding: { type: 'bool', probability: 0.9 },
+          evidence_E1: { type: 'bool', probability: 0.9 },
+        },
+      };
+    }
+    return relevanceAnswers(sortedRelevance);
+  };
+  await analyze(technicalRequest, { classify });
+  assert.equal(calls, 2);
+});
+
+test('live uncertain result makes exactly one classifier call', async () => {
+  let calls = 0;
+  const classify = async () => {
+    calls++;
+    return {
+      answers: {
+        classification: { type: 'choice', choice: 'bogus', confidence: 0.9 },
+        evidence_grounding: { type: 'bool', probability: 0.9 },
+        evidence_E1: { type: 'bool', probability: 0.9 },
+      },
+    };
+  };
+  await analyze(technicalRequest, { classify });
+  assert.equal(calls, 1);
+});
+
+test('live relevance answers produce a ranked shortlist', async () => {
+  let calls = 0;
+  const classify = async () => {
+    calls++;
+    if (calls === 1) {
+      return {
+        answers: {
+          classification: { type: 'choice', choice: 'technical', confidence: 0.9 },
+          evidence_grounding: { type: 'bool', probability: 0.9 },
+          evidence_E1: { type: 'bool', probability: 0.9 },
+        },
+      };
+    }
+    return relevanceAnswers({ '2': 0.9 });
+  };
+  const result = await analyze(technicalRequest, { classify });
+  assert.equal(result.principles[0]?.id, '2');
+});
+
+test('live failed relevance call returns the full unranked catalog', async () => {
+  let calls = 0;
+  const classify = async () => {
+    calls++;
+    if (calls === 1) {
+      return {
+        answers: {
+          classification: { type: 'choice', choice: 'technical', confidence: 0.9 },
+          evidence_grounding: { type: 'bool', probability: 0.9 },
+          evidence_E1: { type: 'bool', probability: 0.9 },
+        },
+      };
+    }
+    return { errorMessage: 'relevance backend failed' };
+  };
+  const result = await analyze(technicalRequest, { classify });
+  assert.equal(result.principles.length, CATALOG.technical.length);
+});
+
+test('live failed relevance call notes that ranking was unavailable', async () => {
+  let calls = 0;
+  const classify = async () => {
+    calls++;
+    if (calls === 1) {
+      return {
+        answers: {
+          classification: { type: 'choice', choice: 'technical', confidence: 0.9 },
+          evidence_grounding: { type: 'bool', probability: 0.9 },
+          evidence_E1: { type: 'bool', probability: 0.9 },
+        },
+      };
+    }
+    return { errorMessage: 'relevance backend failed' };
+  };
+  const result = await analyze(technicalRequest, { classify });
+  assert.equal(result.notes.some((n) => /ranking was unavailable/i.test(n)), true);
+});
+
+test('live result sums usage from the classification and relevance calls', async () => {
+  let calls = 0;
+  const classify = async () => {
+    calls++;
+    if (calls === 1) {
+      return {
+        answers: {
+          classification: { type: 'choice', choice: 'technical', confidence: 0.9 },
+          evidence_grounding: { type: 'bool', probability: 0.9 },
+          evidence_E1: { type: 'bool', probability: 0.9 },
+        },
+        usage: { input: 10, output: 1 },
+      };
+    }
+    return { ...relevanceAnswers({ '1': 0.9 }), usage: { input: 5, output: 2 } };
+  };
+  const result = await analyze(technicalRequest, { classify });
+  assert.equal(result.usage?.input, 15);
 });
 
 test('result records the schema version', async () => {
@@ -238,27 +606,26 @@ test('result leaves billed cost unknown', async () => {
 });
 
 test('result includes classifier usage when reported', async () => {
-  const classify = async () => ({
-    answers: {
-      classification: { type: 'choice', choice: 'technical', confidence: 0.9 },
-      evidence_grounding: { type: 'bool', probability: 0.9 },
-      evidence_E1: { type: 'bool', probability: 0.9 },
-    },
-    usage: { input: 42, output: 7, totalTokens: 49, cost: { total: 0.001 } },
+  const result = await analyze(technicalRequest, {
+    classify: classifierWithUsage({ input: 42, output: 7, totalTokens: 49, cost: { total: 0.001 } }),
   });
-  const result = await analyze(technicalRequest, { classify });
   assert.equal(result.usage?.input, 42);
 });
 
 function classifierWithUsage(usage: unknown) {
-  return async () => ({
-    answers: {
-      classification: { type: 'choice', choice: 'technical', confidence: 0.9 },
-      evidence_grounding: { type: 'bool', probability: 0.9 },
-      evidence_E1: { type: 'bool', probability: 0.9 },
-    },
-    usage,
-  });
+  let calls = 0;
+  return async () => {
+    calls++;
+    return {
+      answers: {
+        classification: { type: 'choice', choice: 'technical', confidence: 0.9 },
+        evidence_grounding: { type: 'bool', probability: 0.9 },
+        evidence_E1: { type: 'bool', probability: 0.9 },
+      },
+      // Only the classification call reports usage; the relevance call does not.
+      usage: calls === 1 ? usage : undefined,
+    };
+  };
 }
 
 test('analyze reports cache-read tokens when the classifier provides them', async () => {

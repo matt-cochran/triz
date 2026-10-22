@@ -537,6 +537,18 @@ export type TrizRequest = {
   opposingProperties?: string[];
 };
 
+/** A request-contract violation that carries a stable machine-readable code so
+ * callers (including the CLI) can react to specific refusals. */
+export class TrizRequestError extends Error {
+  code: string;
+
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = 'TrizRequestError';
+    this.code = code;
+  }
+}
+
 /** Keys accepted on a new request and on each evidence item. Unknown keys are
  * rejected so misspelled optional fields cannot be silently ignored. */
 const REQUEST_KEYS = ['evidence', 'desiredImprovement', 'worseningOutcome', 'element', 'opposingProperties'] as const;
@@ -576,6 +588,18 @@ export function validateRequest(input: any): TrizRequest {
   ) {
     throw Error('request.opposingProperties must be an array of strings');
   }
+  // A request describes one contradiction framing. Mixing the technical framing
+  // (worseningOutcome) with the physical framing (element/opposingProperties)
+  // is ambiguous, so it is refused before any classifier call.
+  const hasWorsening = input.worseningOutcome !== undefined;
+  const hasPhysicalFrame = input.element !== undefined || input.opposingProperties !== undefined;
+  if (hasWorsening && hasPhysicalFrame) {
+    throw new TrizRequestError(
+      'mixed_framing',
+      'request mixes a technical framing (worseningOutcome) with a physical framing ' +
+        '(element/opposingProperties); split it into separate one-framing requests',
+    );
+  }
   const request: TrizRequest = {
     evidence: input.evidence.map((e: any) => ({ id: e.id, text: e.text })),
     desiredImprovement: input.desiredImprovement,
@@ -601,6 +625,8 @@ export type ClassifierVerdict = {
   provider?: string;
   model?: string;
   usage?: unknown;
+  /** Offline-only: principle-id -> P(true) relevance map for ranking. */
+  relevance?: Record<string, number>;
 };
 
 export type TrizVerdict = {
@@ -766,6 +792,60 @@ export function adaptClassifierResponse(response: any): ClassifierVerdict {
 }
 
 // ---------------------------------------------------------------------------
+// Relevance questions and adapter (ranked shortlist)
+// ---------------------------------------------------------------------------
+
+/** Every principle id that exists in the curated catalog, so relevance answers
+ * for invented ids can be dropped rather than ranked. */
+const CATALOG_PRINCIPLE_IDS = new Set<string>([...CATALOG.technical, ...CATALOG.physical].map((p) => p.id));
+
+/** Deterministic, non-model-generated relevance questions: one bool per
+ * catalog entry, keyed `relevance_<id>`, naming the principle and heuristic so
+ * a confident result can be ranked without asking Jev for free text. */
+export function buildRelevanceQuestions(
+  request: TrizRequest,
+  classification: 'technical' | 'physical',
+): Record<string, ClassifierQuestion> {
+  const catalog = classification === 'technical' ? CATALOG.technical : CATALOG.physical;
+  const questions: Record<string, ClassifierQuestion> = {};
+  for (const p of catalog) {
+    questions[`relevance_${p.id}`] = {
+      type: 'bool',
+      instructions:
+        `Does the "${p.name}" principle help resolve the stated contradiction? ` +
+        `Principle heuristic: ${p.heuristic}`,
+      criteria: {
+        true: `The ${p.name} principle helps resolve the stated contradiction`,
+        false: `The ${p.name} principle does not help resolve the stated contradiction`,
+      },
+    };
+  }
+  return questions;
+}
+
+/** Pure adapter from a raw Jev relevance result to a principle-id -> P(true)
+ * map. Key shape, boolean answers, unknown ids, and non-finite values are all
+ * filtered out. */
+export function adaptRelevanceResponse(response: any): Record<string, number> {
+  const answers =
+    response && typeof response === 'object' && response.answers && typeof response.answers === 'object'
+      ? response.answers
+      : {};
+  const out: Record<string, number> = {};
+  for (const key of Object.keys(answers)) {
+    if (!key.startsWith('relevance_')) continue;
+    const id = key.slice('relevance_'.length);
+    if (!CATALOG_PRINCIPLE_IDS.has(id)) continue;
+    const a = answers[key];
+    if (!a || typeof a !== 'object' || a.type !== 'bool') continue;
+    const v = (a as { probability?: unknown }).probability;
+    if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+    out[id] = v;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Result building, hashing and atomic persistence
 // ---------------------------------------------------------------------------
 
@@ -832,6 +912,16 @@ export function normalizeUsage(u: any): NormalizedUsage | null {
 
 export type Provenance = { provider: string; model: string };
 
+/** A catalog principle plus its ranking metadata. A confident technical or
+ * physical result carries a ranked shortlist; an unranked catalog carries the
+ * principle fields only. */
+export type RankedPrinciple = CatalogPrinciple & {
+  rank?: number;
+  relevance?: number;
+  reason?: string;
+  belowThreshold?: boolean;
+};
+
 export type TrizResult = {
   schemaVersion: number;
   inputHash: string;
@@ -842,7 +932,8 @@ export type TrizResult = {
   confidence: number | null;
   groundedEvidenceIds: string[];
   rationale: string;
-  principles: CatalogPrinciple[];
+  principles: RankedPrinciple[];
+  needs: string[];
   usage: NormalizedUsage | null;
   billedCostUsd: null;
   inferenceDeterministic: false;
@@ -855,20 +946,118 @@ export type TrizResult = {
   notes: string[];
 };
 
-function principlesFor(classification: ResultClassification): CatalogPrinciple[] {
+/** Minimum relevance for a principle to count as a confident match. */
+export const RELEVANCE_FLOOR = 0.5;
+/** A confident result returns at most this many ranked principles. */
+export const MAX_RANKED_PRINCIPLES = 8;
+/** When fewer than this many principles clear the relevance floor, the top
+ * few by relevance are returned flagged `belowThreshold`. */
+export const MIN_QUALIFYING_PRINCIPLES = 3;
+
+function catalogFor(classification: ResultClassification): CatalogPrinciple[] {
   if (classification === 'technical') return CATALOG.technical.map((p) => ({ ...p }));
   if (classification === 'physical') return CATALOG.physical.map((p) => ({ ...p }));
   return [];
 }
 
+function relevanceReason(relevance: number, request: TrizRequest, verdict: TrizVerdict): string {
+  const score = relevance.toFixed(2);
+  const ids = verdict.groundedEvidenceIds.length ? verdict.groundedEvidenceIds.join(', ') : 'none';
+  if (verdict.classification === 'physical') {
+    const props = (request.opposingProperties ?? []).join(' and ');
+    return `Relevance ${score} to ${request.element ?? 'the element'} needing ${props}; grounded in ${ids}`;
+  }
+  return `Relevance ${score} to improving ${request.desiredImprovement} without worsening ${
+    request.worseningOutcome ?? 'the worsening outcome'
+  }; grounded in ${ids}`;
+}
+
+/** Deterministic ranking only: order comes solely from the relevance answers
+ * over the existing catalog. With no usable relevance data the full catalog is
+ * returned unranked, preserving today's behaviour. */
+export function rankPrinciples(
+  catalog: CatalogPrinciple[],
+  relevance: Record<string, number> | null,
+  request: TrizRequest,
+  verdict: TrizVerdict,
+): RankedPrinciple[] {
+  const unranked = (): RankedPrinciple[] => catalog.map((p) => ({ ...p }));
+  if (!relevance || typeof relevance !== 'object') return unranked();
+
+  const scored: { principle: CatalogPrinciple; relevance: number }[] = [];
+  for (const p of catalog) {
+    const v = relevance[p.id];
+    if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+    scored.push({ principle: p, relevance: v });
+  }
+  if (scored.length === 0) return unranked();
+
+  // Array.prototype.sort is stable, so equal relevance keeps catalog order.
+  scored.sort((a, b) => b.relevance - a.relevance);
+  const qualifying = scored.filter((s) => s.relevance >= RELEVANCE_FLOOR);
+  const useFallback = qualifying.length < MIN_QUALIFYING_PRINCIPLES;
+  const chosen = (useFallback ? scored.slice(0, MIN_QUALIFYING_PRINCIPLES) : qualifying).slice(0, MAX_RANKED_PRINCIPLES);
+
+  return chosen.map((s, i) => ({
+    ...s.principle,
+    rank: i + 1,
+    relevance: s.relevance,
+    reason: relevanceReason(s.relevance, request, verdict),
+    ...(useFallback ? { belowThreshold: true } : {}),
+  }));
+}
+
+/** Deterministic rationale for a confident technical or physical result. The
+ * classifier rationale, when present, is appended so the named request fields
+ * and grounded evidence ids are always present. */
+function deterministicRationale(request: TrizRequest, verdict: TrizVerdict): string {
+  const ids = verdict.groundedEvidenceIds.length ? verdict.groundedEvidenceIds.join(', ') : 'no evidence id';
+  if (verdict.classification === 'technical') {
+    return `Improving ${request.desiredImprovement} without worsening ${
+      request.worseningOutcome ?? 'the worsening outcome'
+    }; grounded in evidence ${ids}.`;
+  }
+  if (verdict.classification === 'physical') {
+    const props = (request.opposingProperties ?? []).join(' and ');
+    return `${request.element ?? 'The element'} must satisfy ${props}; grounded in evidence ${ids}.`;
+  }
+  return '';
+}
+
+/** Request fields or evidence the caller should add to make progress. */
+function needsFor(request: TrizRequest, verdict: TrizVerdict): string[] {
+  if (verdict.classification === 'uncertain') {
+    return ['more evidence that states the trade-off directly', ...verdict.notes];
+  }
+  if (verdict.classification === 'insufficient') {
+    const physical =
+      verdict.notes.some((n) => /physical/i.test(n)) ||
+      request.element !== undefined ||
+      (request.opposingProperties?.length ?? 0) > 0;
+    return physical ? ['element', 'opposingProperties'] : ['worseningOutcome'];
+  }
+  return [];
+}
+
 export function buildResult(input: {
   inputHash: string;
+  request: TrizRequest;
   requested: Provenance;
   verdict: TrizVerdict;
   provenance: Provenance;
   usage: NormalizedUsage | null;
+  relevance?: Record<string, number> | null;
 }): TrizResult {
-  const { inputHash, requested, verdict, provenance, usage } = input;
+  const { inputHash, request, requested, verdict, provenance, usage, relevance } = input;
+  const confident = verdict.classification === 'technical' || verdict.classification === 'physical';
+  const principles = confident ? rankPrinciples(catalogFor(verdict.classification), relevance ?? null, request, verdict) : [];
+  const rankingUnavailable = confident && principles.length > 0 && principles.every((p) => p.rank === undefined);
+  const deterministic = deterministicRationale(request, verdict);
+  const rationale = deterministic
+    ? verdict.rationale
+      ? `${deterministic} ${verdict.rationale}`
+      : deterministic
+    : verdict.rationale;
   return {
     schemaVersion: SCHEMA_VERSION,
     inputHash,
@@ -882,8 +1071,9 @@ export function buildResult(input: {
     classification: verdict.classification,
     confidence: verdict.confidence,
     groundedEvidenceIds: verdict.groundedEvidenceIds,
-    rationale: verdict.rationale,
-    principles: principlesFor(verdict.classification),
+    rationale,
+    principles,
+    needs: needsFor(request, verdict),
     usage,
     billedCostUsd: null,
     inferenceDeterministic: false,
@@ -895,6 +1085,9 @@ export function buildResult(input: {
     },
     notes: [
       ...verdict.notes,
+      ...(rankingUnavailable
+        ? ['Principle ranking was unavailable: the classifier returned no usable relevance answers; the full catalog is returned unranked.']
+        : []),
       ...(provenance.model.startsWith('~') ? ['Provider reported a model alias; the resolved underlying model version is unavailable.'] : []),
       'Classifier output is probabilistic inference; only the catalog mapping is deterministic.',
       'Billed cost is unknown: no upstream provider billing response is captured. A finite Pi SDK usage cost is labelled as Pi-reported (source: pi_reported) and is an estimate, not a bill; an absent cost is unknown, not free.',
@@ -1053,6 +1246,27 @@ async function invokeClassifier(
 // Analysis orchestration
 // ---------------------------------------------------------------------------
 
+/** Sum two normalized usages, used when a confident result makes a
+ * classification call and a relevance call. A cost is known only when at least
+ * one call reported a finite one. */
+function addUsage(a: NormalizedUsage | null, b: NormalizedUsage | null): NormalizedUsage | null {
+  if (!a) return b;
+  if (!b) return a;
+  const costA = a.piReported.available ? a.piReported.amountUsd : null;
+  const costB = b.piReported.available ? b.piReported.amountUsd : null;
+  const total = costA === null && costB === null ? null : (costA ?? 0) + (costB ?? 0);
+  return {
+    input: a.input + b.input,
+    output: a.output + b.output,
+    cacheRead: a.cacheRead + b.cacheRead,
+    cacheWrite: a.cacheWrite + b.cacheWrite,
+    totalTokens: a.totalTokens + b.totalTokens,
+    available: true,
+    costUsd: total,
+    piReported: { amountUsd: total, available: total !== null, source: 'pi_reported' },
+  };
+}
+
 export type AnalyzeOptions = {
   /** Deterministic offline fixture: a normalized verdict object or its path. */
   offline?: ClassifierVerdict | string;
@@ -1079,6 +1293,7 @@ export async function analyze(requestInput: unknown, options: AnalyzeOptions = {
   let verdict: TrizVerdict;
   let provenance: Provenance = { provider: 'unavailable', model: 'unavailable' };
   let usage: NormalizedUsage | null = null;
+  let relevance: Record<string, number> | null = null;
 
   if (options.offline !== undefined) {
     const fixture: any =
@@ -1086,6 +1301,11 @@ export async function analyze(requestInput: unknown, options: AnalyzeOptions = {
     verdict = interpretVerdict(request, fixture);
     provenance = { provider: str(fixture?.provider) ?? 'unavailable', model: str(fixture?.model) ?? 'unavailable' };
     usage = normalizeUsage(fixture?.usage);
+    const rawRelevance = fixture?.relevance;
+    relevance =
+      rawRelevance && typeof rawRelevance === 'object' && !Array.isArray(rawRelevance)
+        ? (rawRelevance as Record<string, number>)
+        : null;
   } else {
     let classify = options.classify;
     if (!classify) {
@@ -1113,11 +1333,29 @@ export async function analyze(requestInput: unknown, options: AnalyzeOptions = {
         provenance = { provider: str(result?.provider) ?? 'unavailable', model: str(result?.model) ?? 'unavailable' };
         usage = normalizeUsage(result?.usage);
         verdict = interpretVerdict(request, adaptClassifierResponse(result));
+        // Only a confident technical/physical verdict has a principle catalog to
+        // rank, so only then is the second (relevance) classifier call made.
+        if (verdict.classification === 'technical' || verdict.classification === 'physical') {
+          const relevanceCall = await invokeClassifier(
+            classify,
+            {
+              state: buildState(request),
+              questions: buildRelevanceQuestions(request, verdict.classification),
+            },
+            timeoutMs,
+            signal,
+          );
+          if (!relevanceCall.error) {
+            usage = addUsage(usage, normalizeUsage(relevanceCall.result?.usage));
+            const adapted = adaptRelevanceResponse(relevanceCall.result);
+            relevance = Object.keys(adapted).length > 0 ? adapted : null;
+          }
+        }
       }
     }
   }
 
-  const result = buildResult({ inputHash, requested, verdict: verdict!, provenance, usage });
+  const result = buildResult({ inputHash, request, requested, verdict: verdict!, provenance, usage, relevance });
   if (options.out) writeResultAtomic(options.out, result);
   return result;
 }
@@ -1261,6 +1499,13 @@ function parseCommandArgs(spec: CliCommandSpec, args: string[]): ParsedArgs {
 function reportCliError(message: string, usage: string): void {
   console.error(`error: ${message}`);
   console.error(usage);
+}
+
+/** Render an uncaught CLI error, including a stable `[code]` when the error
+ * carries one (for example a TrizRequestError with `mixed_framing`). */
+function formatCliException(e: unknown): string {
+  const code = e && typeof e === 'object' && typeof (e as { code?: unknown }).code === 'string' ? (e as { code: string }).code : null;
+  return code ? `error[${code}]: ${msg(e)}` : `error: ${msg(e)}`;
 }
 
 async function cliAnalyze(spec: CliCommandSpec, args: string[]): Promise<number> {
@@ -2157,7 +2402,7 @@ function cliSkills(args: string[]): number {
     if (e instanceof SkillsUsageError) {
       reportCliError(e.message, SKILLS_USAGE);
     } else {
-      console.error(`error: ${msg(e)}`);
+      console.error(formatCliException(e));
     }
     return 1;
   }
@@ -2187,7 +2432,14 @@ export async function runCli(argv: string[]): Promise<number> {
     reportCliError(`unknown command: ${command}`, MAIN_USAGE);
     return 1;
   }
-  if (spec.name === 'analyze') return cliAnalyze(spec, rest);
+  if (spec.name === 'analyze') {
+    try {
+      return await cliAnalyze(spec, rest);
+    } catch (e) {
+      console.error(formatCliException(e));
+      return 1;
+    }
+  }
   if (spec.name === 'inspect') return cliInspect(spec, rest);
   return cliCatalog(spec, rest);
 }
@@ -2212,7 +2464,7 @@ if (isDirectInvocation()) {
       process.exitCode = code;
     },
     (e) => {
-      console.error(msg(e));
+      console.error(formatCliException(e));
       process.exitCode = 1;
     },
   );
