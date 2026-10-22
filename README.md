@@ -33,6 +33,19 @@ answer without an element and two opposing properties, is downgraded to
 The classifier output is probabilistic. Only the catalog mapping is
 deterministic; the result always records `inferenceDeterministic: false`.
 
+For a confident `technical` or `physical` result the tool returns a ranked
+shortlist instead of the whole catalog: at most eight principles (or separation
+routes), ordered by relevance descending, each carrying a `rank`, `relevance`,
+and a deterministic non-empty `reason`. Principles below the `0.5` relevance
+floor are excluded, except that when fewer than three qualify the top three by
+relevance are returned flagged `belowThreshold: true`. When no relevance data is
+available (an offline fixture without it, or a failed relevance call) the full
+catalog is returned unranked, as before, and `notes` records that ranking was
+unavailable. A request that mixes both framings (a `worseningOutcome` together
+with `element`/`opposingProperties`) is refused before any classifier call with
+the code `mixed_framing`. `uncertain` and `insufficient` results carry a `needs`
+array naming the request fields or evidence to add.
+
 ## Requirements
 
 - **Node.js 24 or newer.** The shipped JavaScript uses modern ESM and Node
@@ -65,15 +78,15 @@ together with `checksums.sha256` and `release-manifest.json`.
 
 ```sh
 # 1. Download the release asset, checksum file, and manifest.
-curl -LO https://github.com/matt-cochran/triz/releases/download/v0.3.0/triz-v0.3.0-node.tgz
-curl -LO https://github.com/matt-cochran/triz/releases/download/v0.3.0/checksums.sha256
-curl -LO https://github.com/matt-cochran/triz/releases/download/v0.3.0/release-manifest.json
+curl -LO https://github.com/matt-cochran/triz/releases/download/v0.4.0/triz-v0.4.0-node.tgz
+curl -LO https://github.com/matt-cochran/triz/releases/download/v0.4.0/checksums.sha256
+curl -LO https://github.com/matt-cochran/triz/releases/download/v0.4.0/release-manifest.json
 
 # 2. Verify the download (Linux: sha256sum, macOS: shasum -a 256 -c).
 sha256sum -c checksums.sha256
 
 # 3. Install the tarball without compiling anything.
-npm install -g ./triz-v0.3.0-node.tgz
+npm install -g ./triz-v0.4.0-node.tgz
 
 # 4. Run it.
 triz catalog
@@ -188,7 +201,11 @@ Concurrent runs on the same skills directory are serialized by a
 
 `evidence` and `desiredImprovement` are required. `worseningOutcome` is needed
 for a confident `technical` result; `element` and `opposingProperties` are
-needed for a confident `physical` result.
+needed for a confident `physical` result. A request must use one framing:
+setting a `worseningOutcome` together with `element` or `opposingProperties` is
+refused with `error[mixed_framing]` (the library throws a `TrizRequestError`
+with code `mixed_framing`), because it is ambiguous whether the contradiction is
+technical or physical. Split such a request into separate one-framing requests.
 
 The request contract is strict: unknown top-level keys and unknown evidence-item
 keys are rejected with an error naming the offending key, so a misspelled
@@ -207,7 +224,17 @@ the explicit `--out` path and contains:
 - `requested` and `reported` provider/model. `reported` is the model the
   classifier actually returned, or `unavailable` when it did not return one.
 - `classification`, `confidence`, `groundedEvidenceIds`, `rationale`,
-  `principles`
+  `principles`. A confident `technical` or `physical` result populates
+  `principles` with a ranked shortlist (`rank`, `relevance`, `reason`, and
+  optionally `belowThreshold`); an unranked catalog has the principle fields
+  only. The deterministic `rationale` names the desired improvement and
+  worsening outcome (technical) or the element and opposing properties
+  (physical) and the grounded evidence ids.
+- `needs`, a possibly empty array naming the request fields or evidence to add.
+  For an `uncertain` result it begins with `more evidence that states the
+  trade-off directly` and includes the classifier's note; an `insufficient`
+  technical result names `worseningOutcome` and an `insufficient` physical
+  result names `element` and `opposingProperties`.
 - `usage`, or `null` when the classifier reported none. A reported usage
   carries `input`, `output`, `cacheRead`, `cacheWrite`, `totalTokens`, and an
   `available` flag. Token counts are not presented as authoritative zeros when
@@ -231,8 +258,11 @@ The default model is `openrouter` / `~typesafe/jev-latest`. Override with
 `createTrizClassifier`. The live path uses the installed Pi SDK
 `ModelRuntime` + `ModelRegistry.classify` with normal local auth, creating a
 fresh registry per call so the latest alias resolves against the current
-catalog. Requests and SDK startup are bounded by a 45s timeout and an
-`AbortSignal`. Credentials are never printed.
+catalog. A confident `technical` or `physical` result makes a **second**
+classifier call for relevance, so the result's `usage` sums both calls; an
+`uncertain`, `insufficient`, or `none` result makes exactly one call. Requests
+and SDK startup are bounded by a 45s timeout and an `AbortSignal`. Credentials
+are never printed.
 
 ## Catalog scope
 
@@ -266,17 +296,21 @@ It cites seven sources:
 Having every principle is **not** a complete contradiction matrix: the object
 stores no 39x39 matrix cells. A software heuristic is not a canonical matrix
 lookup, so `canonicalMatrixLookup` and `completeClassicalMatrix` both remain
-`false`. Recommendations are unranked candidate heuristics, not a deterministic
-selection or a canonical matrix ranking.
+`false`. A confident result's shortlist is a relevance ranking of those
+heuristics produced by the classifier's boolean relevance answers, not a
+deterministic selection from the classical matrix; the ranking never invents
+principles and only orders the existing catalog.
 
 ## Library use (Junior integration)
 
 The compiled package exports the pure pieces so another tool can integrate
 without the CLI: `validateRequest`, `interpretVerdict`, `buildQuestions`,
-`adaptClassifierResponse`, `buildResult`, `hashInput`, `inspectResult`,
-`writeResultAtomic`, `validateCatalog`, `CATALOG`, `CATALOG_VERSION`,
-`PRINCIPLE_IDS`, `PHYSICAL_ROUTE_IDS`, `SCHEMA_VERSION`, `TRIZ_VERSION`, `analyze`, and
-`createTrizClassifier`. Use `analyze(request,
+`buildRelevanceQuestions`, `adaptClassifierResponse`,
+`adaptRelevanceResponse`, `rankPrinciples`, `buildResult`, `hashInput`,
+`inspectResult`, `writeResultAtomic`, `validateCatalog`, `TrizRequestError`,
+`CATALOG`, `CATALOG_VERSION`, `PRINCIPLE_IDS`, `PHYSICAL_ROUTE_IDS`,
+`RELEVANCE_FLOOR`, `MAX_RANKED_PRINCIPLES`, `SCHEMA_VERSION`, `TRIZ_VERSION`,
+`analyze`, and `createTrizClassifier`. Use `analyze(request,
 { classify })` with an injected classifier for offline or custom transports.
 
 ```js
