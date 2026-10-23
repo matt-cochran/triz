@@ -78,15 +78,15 @@ together with `checksums.sha256` and `release-manifest.json`.
 
 ```sh
 # 1. Download the release asset, checksum file, and manifest.
-curl -LO https://github.com/matt-cochran/triz/releases/download/v0.4.0/triz-v0.4.0-node.tgz
-curl -LO https://github.com/matt-cochran/triz/releases/download/v0.4.0/checksums.sha256
-curl -LO https://github.com/matt-cochran/triz/releases/download/v0.4.0/release-manifest.json
+curl -LO https://github.com/matt-cochran/triz/releases/download/v0.4.1/triz-v0.4.1-node.tgz
+curl -LO https://github.com/matt-cochran/triz/releases/download/v0.4.1/checksums.sha256
+curl -LO https://github.com/matt-cochran/triz/releases/download/v0.4.1/release-manifest.json
 
 # 2. Verify the download (Linux: sha256sum, macOS: shasum -a 256 -c).
 sha256sum -c checksums.sha256
 
 # 3. Install the tarball without compiling anything.
-npm install -g ./triz-v0.4.0-node.tgz
+npm install -g ./triz-v0.4.1-node.tgz
 
 # 4. Run it.
 triz catalog
@@ -314,7 +314,7 @@ without the CLI: `validateRequest`, `interpretVerdict`, `buildQuestions`,
 { classify })` with an injected classifier for offline or custom transports.
 
 ```js
-import { analyze, CATALOG } from 'triz';
+import { analyze, CATALOG } from '@matthew-cochran/triz';
 ```
 
 ## Build from source

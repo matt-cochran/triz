@@ -64,7 +64,9 @@ request, run `triz catalog`, and ask. Live runs need an installed Pi SDK
 - `classification` and `confidence`. Confidence below 0.6, or citations of evidence ids
   that are not in the request, become `uncertain`.
 - `groundedEvidenceIds`: the evidence the classification rests on.
-- `principles`: unranked candidate heuristics from the catalog. Treat them as prompts for
+- `principles`: for a confident result, at most 8 candidate heuristics from the catalog
+  with Jev relevance >= 0.5, in descending relevance. When fewer than three clear 0.5, the
+  top 3 by relevance are returned flagged `belowThreshold: true`. Treat them as prompts for
   design options, not as decisions. Classification is probabilistic
   (`inferenceDeterministic: false`), and the catalog is not the classical 39x39 matrix.
 - `billedCostUsd` is always `null`. `usage.piReported` is an estimate, not a bill.
